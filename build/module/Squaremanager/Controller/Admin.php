@@ -1,157 +1,63 @@
 <?php
 
-/**
- * Square Manager - Admin Controller
- *
- * Responsibilities:
- * - Register the Square Manager page in the FOSSBilling admin navigation
- * - Provide routes for:
- *   - Main admin UI page
- *   - Export endpoint (CSV download)
- *
- * Notes:
- * - This controller does NOT contain business logic
- * - Data logic belongs in Api/Admin.php
- * - UI rendering belongs in Twig templates
- */
-class Squaremanager_Controller_Admin implements FOSSBilling\InjectionAwareInterface
-{
-    /**
-     * FOSSBilling dependency injection container.
-     *
-     * @var Pimple\Container
-     */
-    protected $di;
+declare(strict_types=1);
 
-    /**
-     * Inject DI container.
-     *
-     * @param Pimple\Container $di
-     */
-    public function setDi(Pimple\Container $di)
+namespace Box\Mod\Squaremanager\Controller;
+
+use FOSSBilling\InjectionAwareInterface;
+use Pimple\Container;
+
+class Admin implements InjectionAwareInterface
+{
+    protected ?Container $di = null;
+
+    public function setDi(Container $di): void
     {
         $this->di = $di;
     }
 
-    /**
-     * Return DI container.
-     *
-     * @return Pimple\Container
-     */
-    public function getDi()
+    public function getDi(): ?Container
     {
         return $this->di;
     }
 
-    /**
-     * Register navigation menu item in admin panel.
-     *
-     * This adds:
-     *
-     *   System → Square Manager
-     *
-     * The route points to:
-     *   /admin/squaremanager
-     *
-     * @param array $menu Existing admin menu structure
-     *
-     * @return array Modified menu structure
-     */
-    public function navigation($menu)
-    {
-        $menu['system']['children']['squaremanager'] = [
-            'index' => [
-                'label' => 'Square Manager',
-                'uri'   => 'squaremanager',
-                'class' => '',
-                'order' => 90,
-            ],
-        ];
-
-        return $menu;
-    }
-
-    /**
-     * Main admin page route.
-     *
-     * URL:
-     *   /admin/squaremanager
-     *
-     * This method:
-     * - defines page metadata
-     * - triggers Twig template rendering
-     *
-     * The actual UI content is rendered by:
-     *   html_admin/index.html.twig
-     *
-     * @param mixed $api FOSSBilling admin API instance
-     *
-     * @return array Page context
-     */
-    public function get_index($api)
+    public function fetchNavigation(): array
     {
         return [
-            'page_title' => 'Square Manager',
+            'subpages' => [
+                [
+                    'location' => 'extensions',
+                    'label' => __trans('Square Manager'),
+                    'index' => 2100,
+                    'uri' => $this->di['url']->adminLink('squaremanager'),
+                    'class' => '',
+                ],
+            ],
         ];
     }
 
-    /**
-     * Export endpoint.
-     *
-     * URL:
-     *   /admin/squaremanager/export
-     *
-     * This endpoint:
-     * - generates a Square-compatible CSV export
-     * - forces file download
-     * - bypasses Twig rendering via exit
-     *
-     * @param mixed $api FOSSBilling admin API instance
-     */
-    public function get_export($api)
+    public function register(\Box_App &$app): void
     {
-        $this->exportProducts();
-
-        // Prevent template rendering after output
-        exit;
+        $app->get('/squaremanager', 'get_index', [], static::class);
+        $app->get('/squaremanager/export', 'get_export', [], static::class);
     }
 
-    /**
-     * Export FOSSBilling products into Square-compatible CSV format.
-     *
-     * Output includes:
-     * - All products with valid slugs
-     * - All supported billing periods
-     * - Setup fee variations (only if > 0)
-     *
-     * SKU format:
-     *   product-slug-billing
-     *   product-slug-billing-setup
-     *
-     * Example:
-     *   hosting-basic-monthly
-     *   hosting-basic-monthly-setup
-     *
-     * Notes:
-     * - Products without slugs are skipped
-     * - Setup fee rows are only generated when amount > 0.00
-     * - This export aligns exactly with the runtime lookup logic
-     *   used by the payment adapter
-     */
-    private function exportProducts(): void
+    public function get_index(\Box_App $app): string
     {
-        // --------------------------------------------------
-        // HTTP Headers
-        // --------------------------------------------------
-        // Force browser to download CSV file
+        $this->di['is_admin_logged'];
+
+        return $app->render('mod_squaremanager_index');
+    }
+
+    public function get_export(\Box_App $app): void
+    {
+        $this->di['is_admin_logged'];
+
         header('Content-Type: text/csv');
         header('Content-Disposition: attachment; filename="square_export.csv"');
 
         $output = fopen('php://output', 'w');
 
-        // --------------------------------------------------
-        // CSV Header Row
-        // --------------------------------------------------
         fputcsv($output, [
             'Item Name',
             'Variation Name',
@@ -159,93 +65,157 @@ class Squaremanager_Controller_Admin implements FOSSBilling\InjectionAwareInterf
             'Description',
             'Price',
             'Sellable',
-            'Stockable'
+            'Stockable',
         ]);
 
         $db = $this->di['db'];
 
-        // Load all products
-        $products = $db->getAll("SELECT * FROM product ORDER BY id ASC");
+        $products = $db->getAll(
+            "SELECT * FROM product WHERE status = 'enabled' ORDER BY id ASC"
+        );
 
         foreach ($products as $product) {
-
-            $slug = strtolower(trim((string)$product['slug'] ?? ''));
-
-            // Products without slugs cannot be mapped to Square SKUs
+            $slug = strtolower(trim((string)($product['slug'] ?? '')));
             if ($slug === '') {
                 continue;
             }
 
-            $name = (string)$product['title'];
-            $description = (string)($product['description'] ?? '');
+            $productName = trim((string)($product['title'] ?? ''));
+            $baseDescription = trim(strip_tags((string)($product['description'] ?? '')));
 
-            // --------------------------------------------------
-            // Pricing per billing cycle
-            // --------------------------------------------------
-            $pricing = [
-                'weekly'  => (float)($product['price_weekly'] ?? 0),
-                'monthly' => (float)($product['price_monthly'] ?? 0),
-                '3month'  => (float)($product['price_quarterly'] ?? 0),
-                '6month'  => (float)($product['price_semi_annually'] ?? 0),
-                'yearly'  => (float)($product['price_annually'] ?? 0),
-                '2year'   => (float)($product['price_biennially'] ?? 0),
-                '3year'   => (float)($product['price_triennially'] ?? 0),
+            $paymentId = $product['product_payment_id'] ?? null;
+            if (empty($paymentId)) {
+                continue;
+            }
+
+            $payment = $db->getRow(
+                "SELECT * FROM product_payment WHERE id = :id LIMIT 1",
+                [
+                    ':id' => $paymentId,
+                ]
+            );
+
+            if (!$payment) {
+                continue;
+            }
+
+            $pricingMap = [
+                'weekly'  => [
+                    'price'   => 'w_price',
+                    'setup'   => 'w_setup_price',
+                    'enabled' => 'w_enabled',
+                    'label'   => 'Weekly',
+                ],
+                'monthly' => [
+                    'price'   => 'm_price',
+                    'setup'   => 'm_setup_price',
+                    'enabled' => 'm_enabled',
+                    'label'   => 'Monthly',
+                ],
+                '3month'  => [
+                    'price'   => 'q_price',
+                    'setup'   => 'q_setup_price',
+                    'enabled' => 'q_enabled',
+                    'label'   => 'Every 3 Months',
+                ],
+                '6month'  => [
+                    'price'   => 'b_price',
+                    'setup'   => 'b_setup_price',
+                    'enabled' => 'b_enabled',
+                    'label'   => 'Every 6 Months',
+                ],
+                'yearly'  => [
+                    'price'   => 'a_price',
+                    'setup'   => 'a_setup_price',
+                    'enabled' => 'a_enabled',
+                    'label'   => 'Yearly',
+                ],
+                '2year'   => [
+                    'price'   => 'bia_price',
+                    'setup'   => 'bia_setup_price',
+                    'enabled' => 'bia_enabled',
+                    'label'   => 'Every 2 Years',
+                ],
+                '3year'   => [
+                    'price'   => 'tria_price',
+                    'setup'   => 'tria_setup_price',
+                    'enabled' => 'tria_enabled',
+                    'label'   => 'Every 3 Years',
+                ],
             ];
 
-            // --------------------------------------------------
-            // Setup fees per billing cycle
-            // --------------------------------------------------
-            $setup = [
-                'weekly'  => (float)($product['setup_weekly'] ?? 0),
-                'monthly' => (float)($product['setup_monthly'] ?? 0),
-                '3month'  => (float)($product['setup_quarterly'] ?? 0),
-                '6month'  => (float)($product['setup_semi_annually'] ?? 0),
-                'yearly'  => (float)($product['setup_annually'] ?? 0),
-                '2year'   => (float)($product['setup_biennially'] ?? 0),
-                '3year'   => (float)($product['setup_triennially'] ?? 0),
-            ];
+            foreach ($pricingMap as $key => $map) {
+                $enabled = (int)($payment[$map['enabled']] ?? 0);
+                $price   = (float)($payment[$map['price']] ?? 0);
+                $setup   = (float)($payment[$map['setup']] ?? 0);
+                $label   = $map['label'];
 
-            foreach ($pricing as $key => $price) {
+                if ($enabled !== 1) {
+                    continue;
+                }
 
-                // --------------------------------------------------
-                // Recurring variation row
-                // --------------------------------------------------
+                /**
+                 * Recurring item row
+                 *
+                 * Item Name:
+                 *   Basic Hosting
+                 *
+                 * Description:
+                 *   Basic Hosting
+                 *   10GB Storage
+                 *   100GB Bandwidth
+                 *   1 Domain
+                 *
+                 *   Monthly
+                 */
                 if ($price > 0) {
+                    $recurringDescription = $productName;
 
-                    $sku = $slug . '-' . $key;
+                    if ($baseDescription !== '') {
+                        $recurringDescription .= "\n" . $baseDescription;
+                    }
+
+                    $recurringDescription .= "\n\n" . $label;
 
                     fputcsv($output, [
-                        $name,
-                        ucfirst($key),
-                        $sku,
-                        $description,
+                        $productName,
+                        $label,
+                        $slug . '-' . $key,
+                        $recurringDescription,
                         number_format($price, 2, '.', ''),
                         'TRUE',
-                        'FALSE'
+                        'FALSE',
                     ]);
                 }
 
-                // --------------------------------------------------
-                // Setup fee variation row
-                // --------------------------------------------------
-                // Only generated if setup fee is greater than 0.00
-                if (($setup[$key] ?? 0) > 0.00) {
-
-                    $sku = $slug . '-' . $key . '-setup';
+                /**
+                 * Setup fee row
+                 *
+                 * Item Name:
+                 *   Basic Hosting Monthly Setup Fee
+                 *
+                 * Description:
+                 *   Basic Hosting
+                 *   Monthly (Setup Fee)
+                 */
+                if ($setup > 0) {
+                    $setupItemName = $productName . ' ' . $label . ' Setup Fee';
+                    $setupDescription = $productName . "\n" . $label . ' (Setup Fee)';
 
                     fputcsv($output, [
-                        $name,
-                        ucfirst($key) . ' Setup',
-                        $sku,
-                        $description . ' (Setup Fee)',
-                        number_format($setup[$key], 2, '.', ''),
+                        $setupItemName,
+                        $label . ' Setup',
+                        $slug . '-' . $key . '-setup',
+                        $setupDescription,
+                        number_format($setup, 2, '.', ''),
                         'TRUE',
-                        'FALSE'
+                        'FALSE',
                     ]);
                 }
             }
         }
 
         fclose($output);
+        exit;
     }
 }

@@ -318,6 +318,25 @@ HTML;
             ? 'https://connect.squareupsandbox.com'
             : 'https://connect.squareup.com';
     }
+
+    /**
+     * Public wrapper used by the Squaremanager module.
+     *
+     * This allows the admin module to reuse the same SKU-based discovery logic
+     * used during live subscription checkout, without exposing internal helper
+     * methods directly.
+     *
+     * @param int    $productId  FOSSBilling product ID
+     * @param string $billingKey Internal billing key
+     * @param string $squareSku  Exact generated Square SKU
+     *
+     * @return string
+     */
+    public function discoverPlanVariationId(int $productId, string $billingKey, string $squareSku): string
+    {
+        return $this->resolvePlanVariationId($productId, $billingKey, $squareSku);
+    }
+
 /**
      * Process an incoming transaction request.
      *

@@ -1,0 +1,133 @@
+{% extends "layout_default.html.twig" %}
+{% set active_menu = 'extensions' %}
+
+{% block meta_title %}Square Manager{% endblock %}
+
+{% block content %}
+
+<div class="card">
+    <div class="card-body">
+
+        <h3>Square Manager</h3>
+        <p>Manage Square variation mappings and auto-sync products.</p>
+
+        <div style="margin-bottom: 15px;">
+            <button id="sync-all" class="btn btn-primary">Auto Sync All</button>
+        </div>
+
+        <table class="table table-striped">
+            <thead>
+                <tr>
+                    <th>Product</th>
+                    <th>Billing</th>
+                    <th>SKU</th>
+                    <th>Variation ID</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="mapping-table"></tbody>
+        </table>
+
+    </div>
+</div>
+
+{% endblock %}
+
+{% block js %}
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+
+    const table = document.getElementById("mapping-table");
+
+    function loadMappings() {
+        API.admin.squaremanager_mapping().then(function(rows) {
+
+            table.innerHTML = "";
+
+            rows.forEach(function(row) {
+
+                let tr = document.createElement("tr");
+
+                // ? attach product_id to row (used for save)
+                tr.dataset.productId = row.product_id;
+
+                tr.innerHTML = `
+                    <td>${row.product}</td>
+                    <td>${row.billing}</td>
+                    <td>${row.sku}</td>
+                    <td>
+                        <input type="text" value="${row.variation || ''}" data-sku="${row.sku}" class="form-control variation-input">
+                    </td>
+                    <td>
+                        <button class="btn btn-sm btn-success save-btn">Save</button>
+                        <button class="btn btn-sm btn-secondary detect-btn">Detect</button>
+                    </td>
+                `;
+
+                table.appendChild(tr);
+            });
+
+            attachEvents();
+        });
+    }
+
+    function attachEvents() {
+
+        // ? SAVE mapping
+        document.querySelectorAll(".save-btn").forEach(btn => {
+            btn.onclick = function() {
+
+                const row = btn.closest("tr");
+                const input = row.querySelector(".variation-input");
+
+                API.admin.squaremanager_save_mapping({
+                    product_id: row.dataset.productId,
+                    billing: row.children[1].innerText,
+                    sku: input.dataset.sku,
+                    variation: input.value
+                }).then(() => {
+                    alert("Saved ?");
+                });
+            };
+        });
+
+        // ? DETECT single SKU from Square
+        document.querySelectorAll(".detect-btn").forEach(btn => {
+            btn.onclick = function() {
+
+                const row = btn.closest("tr");
+                const input = row.querySelector(".variation-input");
+                const sku = input.dataset.sku;
+
+                API.admin.squaremanager_auto_sync({
+                    single: true,
+                    sku: sku
+                }).then(function(result) {
+
+                    if (result.length > 0) {
+                        input.value = result[0].variation;
+                        alert("Detected ?");
+                    } else {
+                        alert("Not found");
+                    }
+                });
+            };
+        });
+    }
+
+    // ? AUTO SYNC ALL
+    document.getElementById("sync-all").onclick = function() {
+
+        API.admin.squaremanager_auto_sync({}).then(function() {
+            loadMappings();
+            alert("Auto sync complete ?");
+        });
+    };
+
+    loadMappings();
+
+});
+</script>
+
+{% endblock %}

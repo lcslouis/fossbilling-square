@@ -1,115 +1,113 @@
 <?php
 
+declare(strict_types=1);
+
+namespace Box\Mod\Squaremanager\Api;
+
+use FOSSBilling\InjectionAwareInterface;
+use Pimple\Container;
+
 /**
  * Square Manager - Admin API
  *
  * Responsibilities:
- * - Provide mapping data to the admin UI
- * - Save manual overrides for Square subscription plan variation IDs
- * - Run automatic SKU-based detection against the Square adapter
+ * - Return mapping rows for the Square Manager admin UI
+ * - Save manual variation ID overrides
+ * - Auto-detect variation IDs from Square using SKU logic
  *
  * Notes:
- * - This API is intended for authenticated FOSSBilling administrators only.
- * - The payment adapter remains responsible for runtime payment/subscription logic.
- * - This API exists purely to support the Square Manager admin interface.
+ * - Intended for authenticated administrators only
+ * - Reuses the Square payment adapter's discovery logic so:
+ *   - admin auto-sync
+ *   - runtime subscription checkout
+ *   both behave consistently
  */
-class Squaremanager_Api_Admin implements FOSSBilling\InjectionAwareInterface
+class Admin implements InjectionAwareInterface
 {
     /**
-     * FOSSBilling dependency injection container.
-     *
-     * @var Pimple\Container
+     * Dependency injection container.
      */
-    protected $di;
+    protected ?Container $di = null;
 
     /**
-     * Inject the FOSSBilling DI container.
-     *
-     * @param Pimple\Container $di
+     * Inject DI container.
      */
-    public function setDi(Pimple\Container $di)
+    public function setDi(Container $di): void
     {
         $this->di = $di;
     }
 
     /**
-     * Return the DI container.
-     *
-     * @return Pimple\Container
+     * Return DI container.
      */
-    public function getDi()
+    public function getDi(): ?Container
     {
         return $this->di;
     }
 
     /**
-     * Return all product/billing mappings for the admin UI.
+     * Return mapping rows for the admin UI table.
      *
-     * Each row returned represents:
-     * - one FOSSBilling product
-     * - one billing period key
-     * - one generated Square SKU
-     * - one stored Square subscription plan variation ID (if mapped)
+     * Each row contains:
+     * - product_id
+     * - product title
+     * - base slug
+     * - billing key
+     * - generated SKU
+     * - stored Square subscription plan variation ID (if mapped)
      *
-     * This data is used to render the Square Manager table where admins can:
-     * - review generated SKUs
-     * - see missing mappings
-     * - manually edit variation IDs
-     *
-     * @param array $data Unused request payload
-     *
-     * @return array<int, array<string, mixed>>
+     * Frontend usage:
+     *   API.admin.squaremanager_mapping()
      */
-    public function get_mapping(array $data)
+    public function mapping(array $data): array
     {
+        $this->ensureMappingTable();
+
         $db = $this->di['db'];
 
-        // Load all products so we can generate all expected billing/SKU combinations.
-        $products = $db->getAll("SELECT * FROM product ORDER BY id ASC");
+        $products = $db->getAll(
+            "SELECT * FROM product WHERE status = 'enabled' ORDER BY id ASC"
+        );
 
         $rows = [];
+        $billingKeys = [
+            'weekly',
+            'monthly',
+            '3month',
+            '6month',
+            'yearly',
+            '2year',
+            '3year',
+        ];
 
         foreach ($products as $product) {
             $slug = strtolower(trim((string)($product['slug'] ?? '')));
 
-            // Products without slugs cannot participate in the Square SKU mapping strategy,
-            // so they are intentionally skipped.
+            // Products without a slug cannot participate in SKU-based mapping.
             if ($slug === '') {
                 continue;
             }
 
-            // These billing keys match the convention used by the Square payment adapter
-            // for SKU generation and runtime lookup.
-            $billingKeys = [
-                'weekly',
-                'monthly',
-                '3month',
-                '6month',
-                'yearly',
-                '2year',
-                '3year',
-            ];
-
-            foreach ($billingKeys as $key) {
-                // Attempt to load any existing stored mapping for this product + billing key.
-                $row = $db->getRow(
+            foreach ($billingKeys as $billingKey) {
+                $stored = $db->getRow(
                     "SELECT square_plan_variation_id
                      FROM square_product_plan_map
-                     WHERE product_id = :pid AND billing_key = :bk
+                     WHERE product_id = :product_id
+                       AND billing_key = :billing_key
                      LIMIT 1",
                     [
-                        ':pid' => $product['id'],
-                        ':bk'  => $key,
+                        ':product_id' => $product['id'],
+                        ':billing_key' => $billingKey,
                     ]
                 );
 
                 $rows[] = [
-                    'product_id' => $product['id'],
-                    'product'    => $product['title'],
+                    'product_id' => (int)$product['id'],
+                    'product'    => (string)$product['title'],
                     'slug'       => $slug,
-                    'billing'    => $key,
-                    'sku'        => $slug . '-' . $key,
-                    'variation'  => $row['square_plan_variation_id'] ?? '',
+                    'billing'    => $billingKey,
+                    'sku'        => $slug . '-' . $billingKey,
+                    'variation'  => (string)($stored['square_plan_variation_id'] ?? ''),
                 ];
             }
         }
@@ -118,79 +116,62 @@ class Squaremanager_Api_Admin implements FOSSBilling\InjectionAwareInterface
     }
 
     /**
-     * Save or replace a manually entered variation mapping.
+     * Save or replace a manual mapping row.
      *
-     * This is used when an administrator enters (or corrects) the Square
-     * subscription plan variation ID for a specific product + billing key row.
+     * Expected input:
+     * - product_id
+     * - billing
+     * - sku
+     * - variation
      *
-     * Storage model:
-     * - product_id + billing_key is the logical unique key
-     * - square_sku is stored alongside the mapping for traceability
-     *
-     * @param array $data Expected keys:
-     *  - product_id
-     *  - billing
-     *  - sku
-     *  - variation
-     *
-     * @return bool
+     * Frontend usage:
+     *   API.admin.squaremanager_save_mapping(...)
      */
-    public function save_mapping(array $data)
+    public function save_mapping(array $data): bool
     {
+        $this->ensureMappingTable();
+
         $db = $this->di['db'];
 
-        $sql = "
-            REPLACE INTO square_product_plan_map
+        $db->exec(
+            "REPLACE INTO square_product_plan_map
             (product_id, billing_key, square_sku, square_plan_variation_id, updated_at)
             VALUES
-            (:pid, :bk, :sku, :vid, :updated)
-        ";
-
-        $db->exec($sql, [
-            ':pid'     => $data['product_id'],
-            ':bk'      => $data['billing'],
-            ':sku'     => $data['sku'],
-            ':vid'     => $data['variation'],
-            ':updated' => date('Y-m-d H:i:s'),
-        ]);
+            (:product_id, :billing_key, :square_sku, :variation_id, :updated_at)",
+            [
+                ':product_id'   => (int)$data['product_id'],
+                ':billing_key'  => (string)$data['billing'],
+                ':square_sku'   => (string)$data['sku'],
+                ':variation_id' => (string)$data['variation'],
+                ':updated_at'   => date('Y-m-d H:i:s'),
+            ]
+        );
 
         return true;
     }
 
     /**
-     * Automatically attempt to discover Square variation mappings using SKU.
+     * Auto-detect variation IDs from Square using SKU lookup.
      *
-     * Behavior:
-     * - If called with no specific SKU, loops through all products/billing keys
-     * - If called with "single" + "sku", tries only that one SKU row
-     * - Uses the Square payment adapter's runtime discovery logic
-     * - Saves discovered mappings into the local mapping table
+     * Supported modes:
+     * - Full sync: loops through all enabled products + all billing keys
+     * - Single row sync: only processes one SKU if:
+     *     - single = true
+     *     - sku = exact SKU
      *
-     * Why this is useful:
-     * - Reduces manual setup effort
-     * - Lets admins auto-fill mappings after importing products into Square
-     * - Keeps the runtime logic and admin discovery logic consistent
-     *
-     * Expected optional inputs:
-     * - sku    => exact SKU to detect
-     * - single => truthy value to limit detection to one row
-     *
-     * @param array $data
-     *
-     * @return array<int, array<string, string>>
+     * Frontend usage:
+     *   API.admin.squaremanager_auto_sync({})
+     *   API.admin.squaremanager_auto_sync({ sku: "...", single: true })
      */
-    public function auto_sync(array $data)
+    public function auto_sync(array $data): array
     {
+        $this->ensureMappingTable();
+
         $db = $this->di['db'];
-        $results = [];
 
-        // Load the Square gateway adapter via FOSSBilling.
-        // This allows the module to reuse the exact same variation-discovery logic
-        // used during live payment/subscription processing.
-        $invoiceService = $this->di['mod_service']('Invoice');
-        $adapter = $invoiceService->getGatewayAdapter('square');
-
-        $products = $db->getAll("SELECT * FROM product ORDER BY id ASC");
+        $products = $db->getAll(
+            "SELECT * FROM product WHERE status = 'enabled' ORDER BY id ASC"
+        );
 
         $billingKeys = [
             'weekly',
@@ -205,6 +186,13 @@ class Squaremanager_Api_Admin implements FOSSBilling\InjectionAwareInterface
         $singleMode = !empty($data['single']);
         $singleSku = trim((string)($data['sku'] ?? ''));
 
+        $results = [];
+
+        // Reuse the Square payment adapter's discovery logic so the admin UI
+        // and live runtime checkout remain in sync.
+        $invoiceService = $this->di['mod_service']('Invoice');
+        $adapter = $invoiceService->getGatewayAdapter('square');
+
         foreach ($products as $product) {
             $slug = strtolower(trim((string)($product['slug'] ?? '')));
 
@@ -212,33 +200,31 @@ class Squaremanager_Api_Admin implements FOSSBilling\InjectionAwareInterface
                 continue;
             }
 
-            foreach ($billingKeys as $key) {
-                $sku = $slug . '-' . $key;
+            foreach ($billingKeys as $billingKey) {
+                $sku = $slug . '-' . $billingKey;
 
-                // In single mode, only evaluate the requested SKU.
                 if ($singleMode && $sku !== $singleSku) {
                     continue;
                 }
 
-                // Reuse the payment adapter's exact resolution logic.
-                // This keeps admin sync and runtime subscription mapping aligned.
-                $variationId = $adapter->resolvePlanVariationId(
+                $variationId = $adapter->discoverPlanVariationId(
                     (int)$product['id'],
-                    $key,
+                    $billingKey,
                     $sku
                 );
 
-                if ($variationId) {
+                if ($variationId !== '') {
                     $db->exec(
                         "REPLACE INTO square_product_plan_map
                         (product_id, billing_key, square_sku, square_plan_variation_id, updated_at)
-                        VALUES (:pid, :bk, :sku, :vid, :updated)",
+                        VALUES
+                        (:product_id, :billing_key, :square_sku, :variation_id, :updated_at)",
                         [
-                            ':pid'     => $product['id'],
-                            ':bk'      => $key,
-                            ':sku'     => $sku,
-                            ':vid'     => $variationId,
-                            ':updated' => date('Y-m-d H:i:s'),
+                            ':product_id'   => (int)$product['id'],
+                            ':billing_key'  => $billingKey,
+                            ':square_sku'   => $sku,
+                            ':variation_id' => $variationId,
+                            ':updated_at'   => date('Y-m-d H:i:s'),
                         ]
                     );
 
@@ -251,5 +237,29 @@ class Squaremanager_Api_Admin implements FOSSBilling\InjectionAwareInterface
         }
 
         return $results;
+    }
+
+    /**
+     * Ensure the mapping table exists.
+     *
+     * This table stores the relationship between:
+     * - product_id
+     * - billing_key
+     * - generated Square SKU
+     * - Square subscription plan variation ID
+     */
+    private function ensureMappingTable(): void
+    {
+        $this->di['db']->exec(
+            "CREATE TABLE IF NOT EXISTS square_product_plan_map (
+                product_id INT UNSIGNED NOT NULL,
+                billing_key VARCHAR(32) NOT NULL,
+                square_sku VARCHAR(191) NOT NULL,
+                square_plan_variation_id VARCHAR(64) NOT NULL,
+                last_discovered_at DATETIME NULL,
+                updated_at DATETIME NULL,
+                PRIMARY KEY (product_id, billing_key)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
     }
 }
