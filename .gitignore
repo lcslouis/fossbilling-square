@@ -1,0 +1,67 @@
+# =========================
+# System / OS files
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# Git / editor junk
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+data/log/
+
+# =========================
+# FOSSBilling runtime data
+# =========================
+/data/
+/cache/
+/uploads/
+
+# =========================
+# Environment files / secrets
+# =========================
+.env
+.env.*
+config.php
+
+# =========================
+# Composer / dependencies (if used locally)
+# =========================
+vendor/
+node_modules/
+
+# =========================
+# Build / archives (you will create zip manually)
+# =========================
+*.zip
+
+# =========================
+# Testing / temp files
+# =========================
+tmp/
+temp/
+
+# =========================
+# Local dev artifacts
+# =========================
+*.sqlite
+*.db
+*.sql
+
+# =========================
+# Mac/Linux hidden files
+# =========================
+.*
+!.gitignore

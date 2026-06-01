@@ -1,0 +1,8 @@
+
+{
+    "id": "squaremanager",
+    "type": "mod",
+    "name": "Square Integration",
+    "description": "Full Square integration including payment adapter, export tools, and mapping UI",
+    "version": "1.0.0"
+}
