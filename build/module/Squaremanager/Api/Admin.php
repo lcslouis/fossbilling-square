@@ -4,63 +4,140 @@ declare(strict_types=1);
 
 namespace Box\Mod\Squaremanager\Api;
 
-use FOSSBilling\InjectionAwareInterface;
-use Pimple\Container;
-
-/**
- * Square Manager - Admin API
- *
- * Responsibilities:
- * - Return mapping rows for the Square Manager admin UI
- * - Save manual variation ID overrides
- * - Auto-detect variation IDs from Square using SKU logic
- *
- * Notes:
- * - Intended for authenticated administrators only
- * - Reuses the Square payment adapter's discovery logic so:
- *   - admin auto-sync
- *   - runtime subscription checkout
- *   both behave consistently
- */
-class Admin implements InjectionAwareInterface
+class Admin extends \Api_Abstract
 {
     /**
-     * Dependency injection container.
+     * Toggle this to false to disable all SquareManager API debug logging.
      */
-    protected ?Container $di = null;
+    private bool $debugEnabled = true;
 
     /**
-     * Inject DI container.
+     * Optional separate log file.
+     * Leave blank to send logs to php_error.log.
+     *
+     * Example:
+     *   /home/lcsworldsales.com/logs/squaremanager-debug.log
      */
-    public function setDi(Container $di): void
+    private string $debugLogFile = '/home/lcsworldsales.com/public_html/modules/Squaremanager/issues.log';
+
+    public function isAdminApiAllowed(): bool
     {
-        $this->di = $di;
+        return true;
     }
 
     /**
-     * Return DI container.
+     * Central debug logger for this API file.
      */
-    public function getDi(): ?Container
+    private function logDebug(mixed $msg): void
     {
-        return $this->di;
+        if (!$this->debugEnabled) {
+            return;
+        }
+
+        $prefix = '[SquareManager] ';
+        $line = is_array($msg) || is_object($msg)
+            ? $prefix . print_r($msg, true)
+            : $prefix . (string)$msg;
+
+        if ($this->debugLogFile !== '') {
+            @file_put_contents(
+                $this->debugLogFile,
+                '[' . gmdate('Y-m-d H:i:s') . " UTC] " . $line . PHP_EOL,
+                FILE_APPEND
+            );
+            return;
+        }
+
+        error_log($line);
     }
 
     /**
-     * Return mapping rows for the admin UI table.
+     * TEMP diagnostic adapter loader.
      *
-     * Each row contains:
-     * - product_id
-     * - product title
-     * - base slug
-     * - billing key
-     * - generated SKU
-     * - stored Square subscription plan variation ID (if mapped)
+     * This intentionally bypasses unknown FOSSBilling payment config storage
+     * while we debug. Replace these placeholder values with the exact sandbox
+     * credentials that already returned valid Square API data for you.
      *
-     * Frontend usage:
-     *   API.admin.squaremanager_mapping()
+     * Once debugging is complete, we can replace this with proper dynamic
+     * config loading.
+     */
+    
+	
+	private function getSquareAdapter(): \Payment_Adapter_Square
+	{
+		$this->logDebug('getSquareAdapter() loading from pay_gateway');
+
+		$row = $this->di['db']->getRow(
+			"SELECT * FROM pay_gateway
+			WHERE name = :name OR gateway = :gateway
+			LIMIT 1",
+			[
+				':name' => 'Square',
+				':gateway' => 'Square',
+			]
+		);
+
+		if (!$row) {
+			throw new \Exception('Square gateway not found in pay_gateway');
+		}
+
+		$this->logDebug('Raw pay_gateway row:');
+		$this->logDebug($row);
+
+		$config = json_decode((string)$row['config'], true);
+
+		if (!is_array($config)) {
+			throw new \Exception('Invalid Square config JSON in pay_gateway.config');
+		}
+
+		// Required runtime URLs for Payment_AdapterAbstract
+		$config['return_url'] = $this->di['tools']->url('');
+		$config['cancel_url'] = $this->di['tools']->url('');
+		$config['notify_url'] = $this->di['tools']->url('ipn.php?gateway=Square');
+
+		// Keep debug enabled while validating
+		$config['debug_enabled'] = true;
+		$config['debug_log_file'] = '';
+
+		$this->logDebug('Normalized adapter config:');
+		$this->logDebug($config);
+
+		$adapter = new \Payment_Adapter_Square($config);
+		$adapter->setDi($this->di);
+
+		return $adapter;
+	}
+
+
+
+
+
+    /**
+     * Ensure mapping table exists.
+     */
+    private function ensureMappingTable(): void
+    {
+        $this->logDebug('ensureMappingTable() called');
+
+        $this->di['db']->exec(
+            "CREATE TABLE IF NOT EXISTS square_product_plan_map (
+                product_id INT NOT NULL,
+                billing_key VARCHAR(32) NOT NULL,
+                square_sku VARCHAR(191) NOT NULL,
+                square_plan_variation_id VARCHAR(64) NOT NULL,
+                updated_at DATETIME NULL,
+                PRIMARY KEY (product_id, billing_key)
+            )"
+        );
+    }
+/**
+     * Recurring rows only.
+     * Setup fee rows are intentionally excluded because they are charged once
+     * and do not need subscription plan variation IDs.
      */
     public function mapping(array $data): array
     {
+        $this->logDebug('mapping() called');
         $this->ensureMappingTable();
 
         $db = $this->di['db'];
@@ -70,25 +147,52 @@ class Admin implements InjectionAwareInterface
         );
 
         $rows = [];
-        $billingKeys = [
-            'weekly',
-            'monthly',
-            '3month',
-            '6month',
-            'yearly',
-            '2year',
-            '3year',
+
+        $pricingMap = [
+            'weekly'  => ['price' => 'w_price',   'enabled' => 'w_enabled'],
+            'monthly' => ['price' => 'm_price',   'enabled' => 'm_enabled'],
+            '3month'  => ['price' => 'q_price',   'enabled' => 'q_enabled'],
+            '6month'  => ['price' => 'b_price',   'enabled' => 'b_enabled'],
+            'yearly'  => ['price' => 'a_price',   'enabled' => 'a_enabled'],
+            '2year'   => ['price' => 'bia_price', 'enabled' => 'bia_enabled'],
+            '3year'   => ['price' => 'tria_price','enabled' => 'tria_enabled'],
         ];
 
         foreach ($products as $product) {
             $slug = strtolower(trim((string)($product['slug'] ?? '')));
-
-            // Products without a slug cannot participate in SKU-based mapping.
             if ($slug === '') {
+                $this->logDebug('mapping() skipped product with empty slug: ' . print_r($product, true));
                 continue;
             }
 
-            foreach ($billingKeys as $billingKey) {
+            $payment = $db->getRow(
+                "SELECT * FROM product_payment WHERE id = :id LIMIT 1",
+                [':id' => $product['product_payment_id']]
+            );
+
+            if (!$payment) {
+                $this->logDebug('mapping() no payment row found for product_id=' . (int)$product['id']);
+                continue;
+            }
+
+            foreach ($pricingMap as $billingKey => $map) {
+                $enabled = (int)($payment[$map['enabled']] ?? 0);
+                $price   = (float)($payment[$map['price']] ?? 0);
+
+                $this->logDebug([
+                    'mapping() candidate' => [
+                        'product_id' => (int)$product['id'],
+                        'product_title' => (string)$product['title'],
+                        'billing_key' => $billingKey,
+                        'enabled' => $enabled,
+                        'price' => $price,
+                    ],
+                ]);
+
+                if ($enabled !== 1 || $price <= 0) {
+                    continue;
+                }
+
                 $stored = $db->getRow(
                     "SELECT square_plan_variation_id
                      FROM square_product_plan_map
@@ -104,7 +208,6 @@ class Admin implements InjectionAwareInterface
                 $rows[] = [
                     'product_id' => (int)$product['id'],
                     'product'    => (string)$product['title'],
-                    'slug'       => $slug,
                     'billing'    => $billingKey,
                     'sku'        => $slug . '-' . $billingKey,
                     'variation'  => (string)($stored['square_plan_variation_id'] ?? ''),
@@ -112,28 +215,23 @@ class Admin implements InjectionAwareInterface
             }
         }
 
+        $this->logDebug('mapping() returning rows count=' . count($rows));
+        $this->logDebug($rows);
+
         return $rows;
     }
 
     /**
      * Save or replace a manual mapping row.
-     *
-     * Expected input:
-     * - product_id
-     * - billing
-     * - sku
-     * - variation
-     *
-     * Frontend usage:
-     *   API.admin.squaremanager_save_mapping(...)
      */
     public function save_mapping(array $data): bool
     {
+        $this->logDebug('save_mapping() called');
+        $this->logDebug($data);
+
         $this->ensureMappingTable();
 
-        $db = $this->di['db'];
-
-        $db->exec(
+        $this->di['db']->exec(
             "REPLACE INTO square_product_plan_map
             (product_id, billing_key, square_sku, square_plan_variation_id, updated_at)
             VALUES
@@ -147,24 +245,20 @@ class Admin implements InjectionAwareInterface
             ]
         );
 
+        $this->logDebug('save_mapping() completed successfully');
+
         return true;
     }
-
-    /**
-     * Auto-detect variation IDs from Square using SKU lookup.
-     *
-     * Supported modes:
-     * - Full sync: loops through all enabled products + all billing keys
-     * - Single row sync: only processes one SKU if:
-     *     - single = true
-     *     - sku = exact SKU
-     *
-     * Frontend usage:
-     *   API.admin.squaremanager_auto_sync({})
-     *   API.admin.squaremanager_auto_sync({ sku: "...", single: true })
+	/**
+     * Auto-detect recurring subscription plan variation IDs only.
+     * If a cadence maps to more than one Square subscription plan variation,
+     * no auto-match is made for that billing key.
      */
     public function auto_sync(array $data): array
     {
+        $this->logDebug('auto_sync() called');
+        $this->logDebug($data);
+
         $this->ensureMappingTable();
 
         $db = $this->di['db'];
@@ -173,45 +267,69 @@ class Admin implements InjectionAwareInterface
             "SELECT * FROM product WHERE status = 'enabled' ORDER BY id ASC"
         );
 
-        $billingKeys = [
-            'weekly',
-            'monthly',
-            '3month',
-            '6month',
-            'yearly',
-            '2year',
-            '3year',
+        $pricingMap = [
+            'weekly'  => ['price' => 'w_price',   'enabled' => 'w_enabled'],
+            'monthly' => ['price' => 'm_price',   'enabled' => 'm_enabled'],
+            '3month'  => ['price' => 'q_price',   'enabled' => 'q_enabled'],
+            '6month'  => ['price' => 'b_price',   'enabled' => 'b_enabled'],
+            'yearly'  => ['price' => 'a_price',   'enabled' => 'a_enabled'],
+            '2year'   => ['price' => 'bia_price', 'enabled' => 'bia_enabled'],
+            '3year'   => ['price' => 'tria_price','enabled' => 'tria_enabled'],
         ];
 
         $singleMode = !empty($data['single']);
         $singleSku = trim((string)($data['sku'] ?? ''));
 
         $results = [];
-
-        // Reuse the Square payment adapter's discovery logic so the admin UI
-        // and live runtime checkout remain in sync.
-        $invoiceService = $this->di['mod_service']('Invoice');
-        $adapter = $invoiceService->getGatewayAdapter('square');
+        $adapter = $this->getSquareAdapter();
 
         foreach ($products as $product) {
             $slug = strtolower(trim((string)($product['slug'] ?? '')));
-
             if ($slug === '') {
+                $this->logDebug('auto_sync() skipped product with empty slug: ' . print_r($product, true));
                 continue;
             }
 
-            foreach ($billingKeys as $billingKey) {
+            $payment = $db->getRow(
+                "SELECT * FROM product_payment WHERE id = :id LIMIT 1",
+                [':id' => $product['product_payment_id']]
+            );
+
+            if (!$payment) {
+                $this->logDebug('auto_sync() no payment row found for product_id=' . (int)$product['id']);
+                continue;
+            }
+
+            foreach ($pricingMap as $billingKey => $map) {
+                $enabled = (int)($payment[$map['enabled']] ?? 0);
+                $price   = (float)($payment[$map['price']] ?? 0);
+
+                if ($enabled !== 1 || $price <= 0) {
+                    continue;
+                }
+
                 $sku = $slug . '-' . $billingKey;
 
                 if ($singleMode && $sku !== $singleSku) {
                     continue;
                 }
 
+                $this->logDebug([
+                    'auto_sync() detect attempt' => [
+                        'product_id' => (int)$product['id'],
+                        'product_title' => (string)$product['title'],
+                        'billing_key' => $billingKey,
+                        'sku' => $sku,
+                    ],
+                ]);
+
                 $variationId = $adapter->discoverPlanVariationId(
                     (int)$product['id'],
                     $billingKey,
                     $sku
                 );
+
+                $this->logDebug('auto_sync() detect result for ' . $sku . ': ' . ($variationId !== '' ? $variationId : '[empty]'));
 
                 if ($variationId !== '') {
                     $db->exec(
@@ -236,30 +354,92 @@ class Admin implements InjectionAwareInterface
             }
         }
 
+        $this->logDebug('auto_sync() returning results count=' . count($results));
+        $this->logDebug($results);
+
         return $results;
     }
 
     /**
-     * Ensure the mapping table exists.
-     *
-     * This table stores the relationship between:
-     * - product_id
-     * - billing_key
-     * - generated Square SKU
-     * - Square subscription plan variation ID
+     * Inspector data:
+     * - item variations from item library
+     * - subscription plan variations for recurring plans
      */
-    private function ensureMappingTable(): void
+    public function list_square_objects(array $data): array
     {
-        $this->di['db']->exec(
-            "CREATE TABLE IF NOT EXISTS square_product_plan_map (
-                product_id INT UNSIGNED NOT NULL,
-                billing_key VARCHAR(32) NOT NULL,
-                square_sku VARCHAR(191) NOT NULL,
-                square_plan_variation_id VARCHAR(64) NOT NULL,
-                last_discovered_at DATETIME NULL,
-                updated_at DATETIME NULL,
-                PRIMARY KEY (product_id, billing_key)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
-        );
+        $this->logDebug('list_square_objects() called');
+
+        $adapter = $this->getSquareAdapter();
+
+        $result = $adapter->listSquareObjectsForInspection();
+
+        $this->logDebug('list_square_objects() adapter result:');
+        $this->logDebug($result);
+
+        return $result;
     }
-}
+/**
+     * Optional helper to quickly verify DB access and product/payment shape.
+     * Safe to keep for debugging while debug logging is enabled.
+     */
+    public function debug_snapshot(array $data): array
+    {
+        $this->logDebug('debug_snapshot() called');
+
+        $db = $this->di['db'];
+
+        $products = $db->getAll(
+            "SELECT id, title, slug, product_payment_id
+             FROM product
+             WHERE status = 'enabled'
+             ORDER BY id ASC
+             LIMIT 10"
+        );
+
+        $this->logDebug('debug_snapshot() products:');
+        $this->logDebug($products);
+
+        $snapshot = [];
+
+        foreach ($products as $product) {
+            $payment = null;
+
+            if (!empty($product['product_payment_id'])) {
+                $payment = $db->getRow(
+                    "SELECT *
+                     FROM product_payment
+                     WHERE id = :id
+                     LIMIT 1",
+                    [':id' => $product['product_payment_id']]
+                );
+            }
+
+            $snapshot[] = [
+                'product' => $product,
+                'payment' => $payment,
+            ];
+        }
+
+        $this->logDebug('debug_snapshot() final snapshot:');
+        $this->logDebug($snapshot);
+
+        return $snapshot;
+    }
+
+    /**
+     * Return current debug settings so you can verify the API file is
+     * using the expected log toggle and log destination.
+     */
+    public function debug_status(array $data): array
+    {
+        $status = [
+            'debug_enabled' => $this->debugEnabled,
+            'debug_log_file' => $this->debugLogFile,
+        ];
+
+        $this->logDebug('debug_status() called');
+        $this->logDebug($status);
+
+        return $status;
+    }
+}	

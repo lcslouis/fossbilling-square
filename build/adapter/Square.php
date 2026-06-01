@@ -1,67 +1,48 @@
 <?php
+
 declare(strict_types=1);
 
 /**
- * Square Payment Adapter for FOSSBilling
+ * Square payment adapter for FOSSBilling
  *
- * Responsibilities:
- * - Render the Square payment form for one-time and subscription invoices
- * - Load the Square frontend script that tokenizes card details
- * - Provide common configuration helpers (sandbox/live mode, keys, locations)
+ * This version includes:
+ * - toggleable debug logging
+ * - separate log file support
+ * - helpers for recurring plan variation detection
+ * - helpers for listing Square objects for inspection
  *
- * Notes:
- * - This adapter is intentionally focused on payment runtime behavior.
- * - Admin/export/mapping UI belongs in the Squaremanager module.
- * - The module can deploy this adapter file into the Payment/Adapter directory.
  */
-class Payment_Adapter_Square implements FOSSBilling\InjectionAwareInterface
+
+class Payment_Adapter_Square extends Payment_AdapterAbstract
 {
     /**
-     * FOSSBilling dependency injection container.
-     *
-     * @var Pimple\Container|null
+     * Optional DI container.
      */
     protected ?Pimple\Container $di = null;
 
     /**
-     * Constructor.
-     *
-     * Validates the minimum required Square credentials depending on whether
-     * the adapter is running in sandbox or live mode.
-     *
-     * @param array $config Gateway configuration stored by FOSSBilling
-     *
-     * @throws Payment_Exception When required credentials are missing
+     * Square API version header.
      */
-    public function __construct(private array $config)
-    {
-        if ($this->isTestMode()) {
-            foreach (['test_application_id', 'test_access_token', 'test_location_id'] as $required) {
-                if (empty($this->config[$required])) {
-                    throw new Payment_Exception(
-                        'The ":pay_gateway" payment gateway is not fully configured. Please configure the :missing',
-                        [':pay_gateway' => 'Square', ':missing' => $required],
-                        4001
-                    );
-                }
-            }
-        } else {
-            foreach (['application_id', 'access_token', 'location_id'] as $required) {
-                if (empty($this->config[$required])) {
-                    throw new Payment_Exception(
-                        'The ":pay_gateway" payment gateway is not fully configured. Please configure the :missing',
-                        [':pay_gateway' => 'Square', ':missing' => $required],
-                        4001
-                    );
-                }
-            }
-        }
-    }
+    protected string $squareApiVersion = '2025-10-16';
 
     /**
-     * Inject the FOSSBilling DI container.
+     * Toggle debug logging on/off.
      *
-     * @param Pimple\Container $di Dependency container
+     * You can also override this via adapter config:
+     *   'debug_enabled' => true
+     */
+    protected bool $debugEnabled = false;
+
+    /**
+     * Custom debug log file path.
+     *
+     * You can also override this via adapter config:
+     *   'debug_log_file' => '/full/path/to/your/logfile.log'
+     */
+    protected string $debugLogFile = '';
+
+    /**
+     * Set DI container.
      */
     public function setDi(Pimple\Container $di): void
     {
@@ -69,9 +50,7 @@ class Payment_Adapter_Square implements FOSSBilling\InjectionAwareInterface
     }
 
     /**
-     * Return the DI container.
-     *
-     * @return Pimple\Container|null
+     * Get DI container.
      */
     public function getDi(): ?Pimple\Container
     {
@@ -79,21 +58,63 @@ class Payment_Adapter_Square implements FOSSBilling\InjectionAwareInterface
     }
 
     /**
-     * Return gateway configuration metadata used by FOSSBilling admin UI.
+     * Construct adapter and initialize debug settings.
      *
-     * This controls:
-     * - whether subscriptions are supported
-     * - which gateway fields appear in admin configuration
+     * @param array $_config
+     */
+    public function __construct(protected $_config)
+    {
+        
+
+        // Debug toggle from config
+        if (isset($_config['debug_enabled'])) {
+            $this->debugEnabled = (bool)$_config['debug_enabled'];
+        }
+
+        // Separate log file from config
+        if (!empty($_config['debug_log_file'])) {
+            $this->debugLogFile = (string)$_config['debug_log_file'];
+        }
+    }
+
+    /**
+     * Write a debug message either to a separate file or php_error.log.
      *
-     * @return array
+     * @param mixed $message
+     * @return void
+     */
+    protected function debugLog(mixed $message): void
+    {
+        if (!$this->debugEnabled) {
+            return;
+        }
+
+        $prefix = '[SquareAdapter] ';
+        $line = is_array($message) || is_object($message)
+            ? $prefix . print_r($message, true)
+            : $prefix . (string)$message;
+
+        if ($this->debugLogFile !== '') {
+            @file_put_contents(
+                $this->debugLogFile,
+                '[' . gmdate('Y-m-d H:i:s') . " UTC] " . $line . PHP_EOL,
+                FILE_APPEND
+            );
+            return;
+        }
+
+        error_log($line);
+    }
+
+    /**
+     * Return adapter configuration schema.
      */
     public static function getConfig(): array
     {
         return [
             'supports_one_time_payments' => true,
-            'supports_subscriptions'     => true,
-            'can_load_in_iframe'         => true,
-            'description'                => 'Accept card payments and subscriptions through Square.',
+            'supports_subscriptions' => true,
+            'description' => 'Accept card payments and subscriptions with Square.',
             'logo' => [
                 'logo'   => 'square.png',
                 'height' => '50px',
@@ -103,54 +124,57 @@ class Payment_Adapter_Square implements FOSSBilling\InjectionAwareInterface
                 'application_id' => [
                     'text',
                     [
-                        'label' => 'Live Application ID',
+                        'label' => 'Application ID',
+                        'required' => true,
                     ],
                 ],
                 'access_token' => [
                     'password',
                     [
-                        'label' => 'Live Access Token',
+                        'label' => 'Access Token',
+                        'required' => true,
                     ],
                 ],
                 'location_id' => [
                     'text',
                     [
-                        'label' => 'Live Location ID',
+                        'label' => 'Location ID',
+                        'required' => true,
+                    ],
+                ],
+                'environment' => [
+                    'select',
+                    [
+                        'label' => 'Environment',
+                        'multiOptions' => [
+                            'production' => 'Production',
+                            'sandbox'    => 'Sandbox',
+                        ],
                     ],
                 ],
                 'webhook_signature_key' => [
                     'password',
                     [
-                        'label'    => 'Live Webhook Signature Key',
+                        'label' => 'Webhook Signature Key',
                         'required' => false,
                     ],
                 ],
-                'test_application_id' => [
+                'debug_enabled' => [
+                    'select',
+                    [
+                        'label' => 'Enable Debug Logging',
+                        'multiOptions' => [
+                            0 => 'No',
+                            1 => 'Yes',
+                        ],
+                    ],
+                ],
+                'debug_log_file' => [
                     'text',
                     [
-                        'label'    => 'Test Application ID',
+                        'label' => 'Debug Log File Path',
                         'required' => false,
-                    ],
-                ],
-                'test_access_token' => [
-                    'password',
-                    [
-                        'label'    => 'Test Access Token',
-                        'required' => false,
-                    ],
-                ],
-                'test_location_id' => [
-                    'text',
-                    [
-                        'label'    => 'Test Location ID',
-                        'required' => false,
-                    ],
-                ],
-                'test_webhook_signature_key' => [
-                    'password',
-                    [
-                        'label'    => 'Test Webhook Signature Key',
-                        'required' => false,
+                        'description' => 'Optional full server path for a dedicated Square debug log file.',
                     ],
                 ],
             ],
@@ -158,739 +182,866 @@ class Payment_Adapter_Square implements FOSSBilling\InjectionAwareInterface
     }
 
     /**
-     * Render the Square checkout form HTML.
-     *
-     * This method does not process payments itself. It only:
-     * - loads invoice context
-     * - determines whether this is a one-time or subscription action
-     * - prints the Square card container
-     * - loads the frontend JS that tokenizes the card and submits the form
-     *
-     * Important:
-     * - The adapter JS file is expected to live alongside this adapter for
-     *   easier deployment by the companion module.
-     * - The actual charge/subscription logic runs later in processTransaction().
-     *
-     * @param mixed $api_admin  FOSSBilling admin API instance
-     * @param int   $invoice_id Invoice ID being paid
-     * @param bool  $subscription Whether the rendered flow is subscription mode
-     *
-     * @return string HTML markup for the payment form
+     * Adapter title.
      */
-    public function getHtml($api_admin, int $invoice_id, bool $subscription): string
+    public function getTitle(): string
     {
-        $invoiceModel = $this->di['db']->load('Invoice', $invoice_id);
-        $invoiceService = $this->di['mod_service']('Invoice');
-        $invoice = $invoiceService->toApiArray($invoiceModel, true);
+        return 'Square';
+    }
 
-        // Resolve the correct Square Application ID and Location ID depending
-        // on whether the gateway is currently in sandbox or live mode.
-        $applicationId = $this->getAppId();
-        $locationId = $this->getLocationId();
+    /**
+     * Return base API URL for the active environment.
+     */
+    protected function getApiBaseUrl(): string
+    {
+        $environment = (string)($this->getParam('environment') ?: 'production');
 
-        // The Square Web Payments SDK uses different script URLs depending
-        // on environment.
-        $squareJsUrl = $this->isTestMode()
+        if ($environment === 'sandbox') {
+            return 'https://connect.squareupsandbox.com';
+        }
+
+        return 'https://connect.squareup.com';
+    }
+
+    /**
+     * Return configured access token.
+     */
+    protected function getAccessToken(): string
+    {
+        return (string)$this->getParam('access_token');
+    }
+
+    /**
+     * Return configured application ID.
+     */
+    protected function getApplicationId(): string
+    {
+        return (string)$this->getParam('application_id');
+    }
+
+    /**
+     * Return configured location ID.
+     */
+    protected function getLocationId(): string
+    {
+        return (string)$this->getParam('location_id');
+    }
+/**
+     * Return adapter logo metadata.
+     */
+    public function getLogo(): array
+    {
+        return [
+            'logo'   => 'square.png',
+            'height' => '50px',
+            'width'  => '200px',
+        ];
+    }
+
+    /**
+     * Confirm whether recurring subscriptions are supported.
+     */
+    public function supportsSubscriptions(): bool
+    {
+        return true;
+    }
+
+    /**
+     * Confirm whether one-time payments are supported.
+     */
+    public function supportsOneTimePayments(): bool
+    {
+        return true;
+    }
+
+    /**
+     * Perform a GET request to the Square API.
+     *
+     * @param string $url
+     * @return array
+     */
+    protected function squareGet(string $url): array
+    {
+        $this->debugLog('squareGet() URL: ' . $url);
+
+        return $this->squareRequest('GET', $url);
+    }
+
+    /**
+     * Perform a POST request to the Square API.
+     *
+     * @param string $url
+     * @param array $payload
+     * @return array
+     */
+    protected function squarePost(string $url, array $payload = []): array
+    {
+        $this->debugLog('squarePost() URL: ' . $url);
+        $this->debugLog('squarePost() Payload:');
+        $this->debugLog($payload);
+
+        return $this->squareRequest('POST', $url, $payload);
+    }
+
+    /**
+     * Perform a generic request to the Square API.
+     *
+     * @param string $method
+     * @param string $url
+     * @param array|null $payload
+     * @return array
+     */
+    protected function squareRequest(string $method, string $url, ?array $payload = null): array
+    {
+        $this->debugLog("squareRequest() START method={$method} url={$url}");
+
+        $ch = curl_init();
+
+        $headers = [
+            'Authorization: Bearer ' . $this->getAccessToken(),
+            'Square-Version: ' . $this->squareApiVersion,
+            'Accept: application/json',
+        ];
+
+        if ($payload !== null) {
+            $headers[] = 'Content-Type: application/json';
+        }
+
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, strtoupper($method));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+
+        if ($payload !== null) {
+            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
+        }
+
+        $responseBody = curl_exec($ch);
+        $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = curl_error($ch);
+
+        curl_close($ch);
+
+        $this->debugLog("squareRequest() HTTP code: {$httpCode}");
+
+        if ($responseBody !== false) {
+            $this->debugLog('squareRequest() raw response body:');
+            $this->debugLog($responseBody);
+        }
+
+        if ($responseBody === false || $curlError) {
+            $this->debugLog('squareRequest() CURL error: ' . $curlError);
+            throw new Exception('Square API request failed: ' . $curlError);
+        }
+
+        $decoded = json_decode((string)$responseBody, true);
+
+        if (!is_array($decoded)) {
+            $this->debugLog('squareRequest() invalid JSON response');
+            throw new Exception('Square API returned an invalid response.');
+        }
+
+        if ($httpCode >= 400) {
+            $message = 'Square API error.';
+
+            if (isset($decoded['errors'][0]['detail'])) {
+                $message = (string)$decoded['errors'][0]['detail'];
+            } elseif (isset($decoded['errors'][0]['code'])) {
+                $message = (string)$decoded['errors'][0]['code'];
+            }
+
+            $this->debugLog('squareRequest() decoded error response:');
+            $this->debugLog($decoded);
+
+            throw new Exception($message);
+        }
+
+        $this->debugLog('squareRequest() decoded response array:');
+        $this->debugLog($decoded);
+
+        return $decoded;
+    }
+
+    /**
+     * Normalize a decimal amount into Square minor units.
+     *
+     * @param float $amount
+     * @return int
+     */
+    protected function toMinorUnits(float $amount): int
+    {
+        return (int)round($amount * 100);
+    }
+
+    /**
+     * Return a stable unique idempotency key.
+     *
+     * @param string $seed
+     * @return string
+     */
+    protected function generateIdempotencyKey(string $seed): string
+    {
+        return substr(
+            hash('sha256', $seed . '|' . microtime(true) . '|' . random_int(1000, 999999)),
+            0,
+            45
+        );
+    }
+/**
+     * Render the payment form shown to the client.
+     *
+     * For one-time payments, this renders the Square card form.
+     * For recurring payments, this still begins with card capture because
+     * Square needs a card on file before a subscription can be created.
+     *
+     * @param array $data
+     * @return string
+     */
+    public function getHtml(array $data): string
+    {
+        $this->debugLog('getHtml() called');
+        $this->debugLog($data);
+
+        $invoiceData = $this->getInvoiceData($data);
+        $isSubscription = $this->isSubscriptionInvoice($data);
+
+        $this->debugLog('getHtml() invoiceData:');
+        $this->debugLog($invoiceData);
+        $this->debugLog('getHtml() isSubscription: ' . ($isSubscription ? 'true' : 'false'));
+
+        $html = [];
+        $html[] = '<div id="square-payment-wrapper">';
+        $html[] = '  <div id="square-card-container"></div>';
+        $html[] = '  <button id="square-card-button" type="button">Pay with Square</button>';
+        $html[] = '  <div id="square-payment-status" style="margin-top:10px;"></div>';
+        $html[] = '</div>';
+
+        $squareConfig = [
+            'applicationId' => $this->getApplicationId(),
+            'locationId'    => $this->getLocationId(),
+            'environment'   => (string)($this->getParam('environment') ?: 'production'),
+            'invoiceId'     => $invoiceData['id'],
+            'amount'        => number_format($invoiceData['total'], 2, '.', ''),
+            'isSubscription'=> $isSubscription,
+        ];
+
+        $this->debugLog('getHtml() squareConfig:');
+        $this->debugLog($squareConfig);
+
+        $html[] = '<script>';
+        $html[] = 'window.squareConfig = ' . json_encode($squareConfig) . ';';
+        $html[] = '</script>';
+
+        $squareJsUrl = $squareConfig['environment'] === 'sandbox'
             ? 'https://sandbox.web.squarecdn.com/v1/square.js'
             : 'https://web.squarecdn.com/v1/square.js';
 
-        // Notify URL is the callback target for the tokenized form submission.
-        $formAction = (string)($this->config['notify_url'] ?? $this->config['redirect_url'] ?? '');
+        $html[] = '<script src="' . $squareJsUrl . '"></script>';
 
-        $amount = number_format((float)$invoice['total'], 2, '.', '');
-        $currency = (string)$invoice['currency'];
-
-        // The frontend posts this hidden action value so the backend knows
-        // whether to create a one-time payment or a subscription.
-        $squareAction = $subscription ? 'create_subscription' : 'create_payment';
-
-        $buttonText = $subscription
-            ? 'Start subscription with Square'
-            : 'Pay ' . $amount . ' ' . $currency . ' with Square';
-
-        // Escape all rendered values to keep the HTML output safe.
-        $formActionEsc = htmlspecialchars($formAction, ENT_QUOTES, 'UTF-8');
-        $invoiceIdEsc = (int)$invoice['id'];
-        $invoiceHashEsc = htmlspecialchars((string)$invoice['hash'], ENT_QUOTES, 'UTF-8');
-        $buttonTextEsc = htmlspecialchars($buttonText, ENT_QUOTES, 'UTF-8');
-
-        $appIdEsc = htmlspecialchars($applicationId, ENT_QUOTES, 'UTF-8');
-        $locIdEsc = htmlspecialchars($locationId, ENT_QUOTES, 'UTF-8');
-        $squareJsUrlEsc = htmlspecialchars($squareJsUrl, ENT_QUOTES, 'UTF-8');
-        $squareActionEsc = htmlspecialchars($squareAction, ENT_QUOTES, 'UTF-8');
-
-        return <<<HTML
-<div
-    id="square-checkout-root"
-    data-square-application-id="{$appIdEsc}"
-    data-square-location-id="{$locIdEsc}"
-    data-square-js-url="{$squareJsUrlEsc}"
-    data-square-action="{$squareActionEsc}"
->
-    <div id="square-card-container" style="max-width:480px;"></div>
-    <div id="square-payment-status" style="margin-top:10px;color:#c00;"></div>
-
-    <form id="square-payment-form" method="post" action="{$formActionEsc}">
-        <input type="hidden" name="invoice_id" value="{$invoiceIdEsc}">
-        <input type="hidden" name="invoice_hash" value="{$invoiceHashEsc}">
-        <input type="hidden" name="source_id" id="square_source_id" value="">
-        <input type="hidden" name="square_action" id="square_action" value="{$squareActionEsc}">
-
-        <button id="square-pay-button" class="btn btn-primary" type="button">
-            {$buttonTextEsc}
-        </button>
-    </form>
-</div>
-
-<script src="{$squareJsUrlEsc}"></script>
-<script src="/library/Payment/Adapter/square-checkout.js"></script>
-HTML;
+        return implode("\n", $html);
     }
 
     /**
-     * Determine whether the gateway is currently running in sandbox mode.
+     * Determine whether the invoice should be treated as a recurring subscription.
      *
+     * @param array $data
      * @return bool
      */
-    private function isTestMode(): bool
+    protected function isSubscriptionInvoice(array $data): bool
     {
-        return (bool)($this->config['test_mode'] ?? false);
-    }
-
-    /**
-     * Return the correct Square Application ID for the active mode.
-     *
-     * @return string
-     */
-    private function getAppId(): string
-    {
-        return $this->isTestMode()
-            ? (string)$this->config['test_application_id']
-            : (string)$this->config['application_id'];
-    }
-
-    /**
-     * Return the correct Square access token for the active mode.
-     *
-     * @return string
-     */
-    private function getAccessToken(): string
-    {
-        return $this->isTestMode()
-            ? (string)$this->config['test_access_token']
-            : (string)$this->config['access_token'];
-    }
-
-    /**
-     * Return the correct Square location ID for the active mode.
-     *
-     * @return string
-     */
-    private function getLocationId(): string
-    {
-        return $this->isTestMode()
-            ? (string)$this->config['test_location_id']
-            : (string)$this->config['location_id'];
-    }
-
-    /**
-     * Return the webhook signing key for the active mode.
-     *
-     * @return string
-     */
-    private function getWebhookSignatureKey(): string
-    {
-        return $this->isTestMode()
-            ? (string)($this->config['test_webhook_signature_key'] ?? '')
-            : (string)($this->config['webhook_signature_key'] ?? '');
-    }
-
-    /**
-     * Return the base Square API URL for the active mode.
-     *
-     * Sandbox and live use different API hosts.
-     *
-     * @return string
-     */
-    private function getApiBaseUrl(): string
-    {
-        return $this->isTestMode()
-            ? 'https://connect.squareupsandbox.com'
-            : 'https://connect.squareup.com';
-    }
-/**
-     * Process an incoming transaction request.
-     *
-     * This method is the main entry point for:
-     * - Browser-submitted payment/subscription forms
-     * - Square webhook callbacks
-     *
-     * Flow:
-     * 1. If the request contains a raw JSON body and Square signature header,
-     *    treat it as a webhook and validate/process it.
-     * 2. Otherwise, treat it as a browser-submitted payment form.
-     * 3. Route to either one-time payment handling or subscription handling.
-     *
-     * @param mixed $api_admin  FOSSBilling admin API instance
-     * @param int   $id         Transaction ID
-     * @param array $data       Incoming callback/request data
-     * @param int   $gateway_id Payment gateway ID
-     *
-     * @throws Payment_Exception When required payment data is missing
-     */
-    public function processTransaction($api_admin, int $id, array $data, int $gateway_id): void
-    {
-        $tx = $this->di['db']->getExistingModelById('Transaction', $id);
-
-        // --------------------------------------------------
-        // Webhook Path
-        // --------------------------------------------------
-        // If Square is calling our notify URL directly, the request will contain:
-        // - a raw JSON body
-        // - the X-Square-HmacSha256-Signature header
-        //
-        // In that case we do not process the request as a browser payment form.
-        $rawBody = (string)($data['http_raw_post_data'] ?? '');
-        $headerSignature =
-            $data['server']['HTTP_X_SQUARE_HMACSHA256_SIGNATURE']
-            ?? $data['server']['REDIRECT_HTTP_X_SQUARE_HMACSHA256_SIGNATURE']
-            ?? null;
-
-        if ($rawBody !== '' && $headerSignature) {
-            $this->handleWebhook($api_admin, $tx, $rawBody, (string)$headerSignature, $gateway_id);
-            return;
+        $invoice = $data['invoice'] ?? null;
+        if (!$invoice) {
+            $this->debugLog('isSubscriptionInvoice() => false (missing invoice)');
+            return false;
         }
 
-        // --------------------------------------------------
-        // Browser Form Path
-        // --------------------------------------------------
-        // For browser-submitted requests, we recover the invoice ID from:
-        // - the existing transaction if already linked
-        // - POST invoice_id
-        // - GET invoice_id
-        //
-        // This adapter requires an invoice because setup fees, recurring amounts,
-        // billing periods, and product identity all come from invoice context.
-        $invoiceId =
-            ($tx->invoice_id ?? null)
-            ?: (int)($data['post']['invoice_id'] ?? 0)
-            ?: (int)($data['get']['invoice_id'] ?? 0);
-
-        if (!$invoiceId) {
-            throw new Payment_Exception('Invoice ID not provided in callback');
+        $items = $invoice['items'] ?? [];
+        if (!is_array($items) || !$items) {
+            $this->debugLog('isSubscriptionInvoice() => false (missing items)');
+            return false;
         }
 
-        $invoice = $this->di['db']->getExistingModelById('Invoice', $invoiceId);
-        $tx->invoice_id = $invoice->id;
-
-        // The frontend posts the hidden action field so the backend knows whether
-        // to create a one-time payment or a subscription.
-        $squareAction = (string)($data['post']['square_action'] ?? 'create_payment');
-
-        // The Square Web Payments SDK tokenizes the card and posts the secure token
-        // as source_id. Without this token, Square cannot create a payment or save
-        // the card for subscription billing.
-        $sourceId = (string)($data['post']['source_id'] ?? '');
-
-        if ($sourceId === '') {
-            throw new Payment_Exception('Missing Square source_id');
-        }
-
-        // --------------------------------------------------
-        // Subscription Flow
-        // --------------------------------------------------
-        // Subscription invoices can include:
-        // - an optional one-time setup fee
-        // - a recurring line item
-        //
-        // The setup fee is charged separately as a normal one-time payment.
-        // The recurring portion is then turned into a Square subscription.
-        if ($squareAction === 'create_subscription') {
-            $this->handleCreateSubscription($api_admin, $tx, $invoice, $sourceId, $gateway_id);
-            return;
-        }
-
-        // --------------------------------------------------
-        // One-Time Payment Flow
-        // --------------------------------------------------
-        // For normal invoices, simply create a standard Square payment.
-        $this->handleOneTimePayment($tx, $invoice, $sourceId);
-    }
-
-    /**
-     * Handle a standard one-time invoice payment.
-     *
-     * This method:
-     * - calculates invoice total
-     * - creates a Square payment
-     * - stores the returned transaction details
-     * - applies funds/marks invoice paid if the payment completed
-     *
-     * @param object $tx       Transaction model
-     * @param object $invoice  Invoice model
-     * @param string $sourceId Square tokenized card source ID
-     *
-     * @throws Payment_Exception When Square returns an invalid or failed response
-     */
-    private function handleOneTimePayment($tx, $invoice, string $sourceId): void
-    {
-        $invoiceService = $this->di['mod_service']('Invoice');
-
-        // Total invoice amount (including tax) is sent to Square in the smallest
-        // currency unit, for example cents for USD.
-        $amount = (float)$invoiceService->getTotalWithTax($invoice);
-        $amountCents = (int)round($amount * 100);
-
-        $squareResponse = $this->createSquarePayment(
-            $sourceId,
-            $amountCents,
-            (string)$invoice->currency,
-            'Invoice #' . (string)$invoice->serie_nr,
-            (string)$invoice->id
-        );
-
-        $payment = $squareResponse['payment'] ?? null;
-        $errors = $squareResponse['errors'] ?? null;
-
-        if (!empty($errors)) {
-            $tx->status = 'error';
-            $tx->error = json_encode($errors, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-            $tx->updated_at = date('Y-m-d H:i:s');
-            $this->di['db']->store($tx);
-
-            throw new Payment_Exception('Square payment failed: ' . $tx->error);
-        }
-
-        if (!is_array($payment) || empty($payment['id'])) {
-            $tx->status = 'error';
-            $tx->error = 'Square payment response missing payment object';
-            $tx->updated_at = date('Y-m-d H:i:s');
-            $this->di['db']->store($tx);
-
-            throw new Payment_Exception('Square payment response invalid');
-        }
-
-        $tx->txn_id = (string)$payment['id'];
-        $tx->txn_status = (string)($payment['status'] ?? 'UNKNOWN');
-        $tx->amount = ((float)($payment['amount_money']['amount'] ?? 0)) / 100;
-        $tx->currency = (string)($payment['amount_money']['currency'] ?? $invoice->currency);
-
-        // If Square completed the payment immediately, apply the funds and mark
-        // the invoice as paid through FOSSBilling services.
-        if (($payment['status'] ?? '') === 'COMPLETED') {
-            $this->applySuccessfulPayment($tx, $invoice, (float)$tx->amount, (string)$payment['id']);
-        } else {
-            $tx->status = 'received';
-        }
-
-        $tx->updated_at = date('Y-m-d H:i:s');
-        $this->di['db']->store($tx);
-    }
-
-    /**
-     * Handle a subscription invoice.
-     *
-     * Subscription invoices may contain:
-     * - a separate one-time setup fee line
-     * - a recurring service line
-     *
-     * This method:
-     * 1. Extracts setup fee + recurring portion from the invoice
-     * 2. Charges setup fee as a one-time payment only if it is > 0.00
-     * 3. Resolves the correct Square subscription plan variation using the
-     *    product slug + billing period strategy
-     * 4. Saves the card on file for the customer
-     * 5. Creates the Square subscription
-     * 6. Creates the matching FOSSBilling subscription record
-     *
-     * @param mixed  $api_admin  FOSSBilling admin API instance
-     * @param object $tx         Transaction model
-     * @param object $invoice    Invoice model
-     * @param string $sourceId   Square tokenized card source ID
-     * @param int    $gateway_id Gateway ID
-     *
-     * @throws Payment_Exception When setup fee or subscription creation fails
-     */
-    private function handleCreateSubscription($api_admin, $tx, $invoice, string $sourceId, int $gateway_id): void
-    {
-        $invoiceApi = $api_admin->invoice_get(['id' => $invoice->id]);
-
-        // Extract the logical payment pieces from the invoice:
-        // - setup_fee
-        // - recurring_amount
-        // - billing_key (monthly, yearly, 3month, etc.)
-        // - generated Square SKU
-        // - subscription period string for FOSSBilling
-        $parts = $this->extractInvoiceChargeParts($invoiceApi);
-
-        if ($parts['product_id'] <= 0) {
-            throw new Payment_Exception('Unable to determine product for subscription invoice');
-        }
-
-        // --------------------------------------------------
-        // Setup Fee Handling
-        // --------------------------------------------------
-        // Setup fees in FOSSBilling are separate one-time invoice lines.
-        // Square subscriptions do not directly embed those one-time setup fees,
-        // so we charge them first as a one-time payment if and only if the fee
-        // is greater than 0.00.
-        //
-        // If setup fee is 0 / 0.00 / missing, we skip this step entirely.
-        if ($parts['setup_fee'] > 0.00) {
-            $setupResponse = $this->createSquarePayment(
-                $sourceId,
-                (int)round($parts['setup_fee'] * 100),
-                (string)$invoice->currency,
-                'Setup fee for invoice #' . (string)$invoice->serie_nr,
-                (string)$invoice->id . '-setup'
-            );
-
-            $setupPayment = $setupResponse['payment'] ?? null;
-            $setupErrors = $setupResponse['errors'] ?? null;
-
-            if (!empty($setupErrors)) {
-                $tx->status = 'error';
-                $tx->error = json_encode($setupErrors, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-                $tx->updated_at = date('Y-m-d H:i:s');
-                $this->di['db']->store($tx);
-
-                throw new Payment_Exception('Square setup fee payment failed: ' . $tx->error);
+        foreach ($items as $item) {
+            if (!empty($item['rel_type']) && $item['rel_type'] === 'invoice_subscription') {
+                $this->debugLog('isSubscriptionInvoice() => true (rel_type invoice_subscription)');
+                return true;
             }
 
-            if (!is_array($setupPayment) || ($setupPayment['status'] ?? '') !== 'COMPLETED') {
-                throw new Payment_Exception('Square setup fee payment did not complete');
+            if (!empty($item['type']) && stripos((string)$item['type'], 'subscription') !== false) {
+                $this->debugLog('isSubscriptionInvoice() => true (type contains subscription)');
+                return true;
             }
         }
 
-        // --------------------------------------------------
-        // SKU-Based Variation Resolution
-        // --------------------------------------------------
-        // The runtime mapping strategy is:
-        //
-        //   FOSS product slug + billing key → deterministic Square SKU
-        //
-        // Example:
-        //   hosting-basic + monthly → hosting-basic-monthly
-        //
-        // This allows exact matching against Square catalog item variation SKUs.
-        $billingKey = $parts['billing_key'];
-        $squareSku = $parts['square_sku'];
-
-        $planVariationId = $this->resolvePlanVariationId(
-            (int)$parts['product_id'],
-            $billingKey,
-            $squareSku
-        );
-
-        if ($planVariationId === '') {
-            throw new Payment_Exception(
-                'No Square plan variation found for product ' . $parts['product_id'] . ' [' . $squareSku . ']'
-            );
-        }
-
-        // --------------------------------------------------
-        // Customer + Card-on-File
-        // --------------------------------------------------
-        // Square subscriptions charge a saved card on file rather than a raw
-        // browser token. Therefore we:
-        // - find or create the Square customer
-        // - save the tokenized card to that customer
-        $client = $this->di['db']->getExistingModelById('Client', $invoice->client_id);
-        $customerId = $this->findOrCreateSquareCustomer($client);
-        $cardId = $this->createCardOnFileFromNonce($customerId, $client, $sourceId);
-
-        // Create the actual Square subscription using the resolved plan variation.
-        $subscriptionResponse = $this->createSquareSubscription(
-            $customerId,
-            $cardId,
-            $planVariationId
-        );
-
-        $subscription = $subscriptionResponse['subscription'] ?? null;
-        $errors = $subscriptionResponse['errors'] ?? null;
-
-        if (!empty($errors)) {
-            $tx->status = 'error';
-            $tx->error = json_encode($errors, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-            $tx->updated_at = date('Y-m-d H:i:s');
-            $this->di['db']->store($tx);
-
-            throw new Payment_Exception('Square subscription failed: ' . $tx->error);
-        }
-
-        if (!is_array($subscription) || empty($subscription['id'])) {
-            $tx->status = 'error';
-            $tx->error = 'Square subscription response missing subscription object';
-            $tx->updated_at = date('Y-m-d H:i:s');
-            $this->di['db']->store($tx);
-
-            throw new Payment_Exception('Square subscription response invalid');
-        }
-
-        $subscriptionId = (string)$subscription['id'];
-        $subscriptionStatus = (string)($subscription['status'] ?? 'ACTIVE');
-
-        // Mirror the subscription into FOSSBilling so future billing/renewal logic
-        // can stay consistent with internal records.
-        $api_admin->invoice_subscription_create([
-            'client_id'  => (int)$client->id,
-            'gateway_id' => $gateway_id,
-            'currency'   => (string)$invoice->currency,
-            'sid'        => $subscriptionId,
-            'status'     => strtolower($subscriptionStatus) === 'active' ? 'active' : 'pending',
-            'period'     => $parts['period_string'],
-            'amount'     => (float)$parts['recurring_amount'],
-            'rel_type'   => 'invoice',
-            'rel_id'     => $invoice->id,
-        ]);
-
-        $tx->txn_id = $subscriptionId;
-        $tx->txn_status = $subscriptionStatus;
-        $tx->s_id = $subscriptionId;
-        $tx->s_period = $parts['period_string'];
-        $tx->amount = (float)$parts['recurring_amount'];
-        $tx->currency = (string)$invoice->currency;
-        $tx->status = 'processed';
-        $tx->error = '';
-        $tx->updated_at = date('Y-m-d H:i:s');
-
-        $this->di['db']->store($tx);
+        $this->debugLog('isSubscriptionInvoice() => false (no subscription markers)');
+        return false;
     }
 
     /**
-     * Extract invoice charge components needed for subscription processing.
+     * Return normalized invoice data needed by payment processing.
      *
-     * Returns:
-     * - product_id:         FOSSBilling product ID
-     * - product_slug:       Base product slug
-     * - setup_fee:          One-time setup amount
-     * - recurring_amount:   Recurring amount only
-     * - billing_key:        Deterministic billing token used for SKU generation
-     * - period_string:      FOSSBilling subscription period string (e.g. 1M, 3M, 1Y)
-     * - square_sku:         Generated Square SKU based on slug + billing key
-     *
-     * The billing key drives both export and runtime mapping.
-     *
-     * @param array $invoiceApi Invoice representation from FOSSBilling API
-     *
+     * @param array $data
      * @return array
      */
-    private function extractInvoiceChargeParts(array $invoiceApi): array
+    protected function getInvoiceData(array $data): array
     {
-        $productId = 0;
-        $setupFee = 0.00;
-        $recurringAmount = 0.00;
-        $billingKey = 'monthly';
-        $periodString = '1M';
-        $productSlug = '';
+        $invoice = $data['invoice'] ?? null;
 
-        foreach (($invoiceApi['lines'] ?? []) as $line) {
-            if (!$productId && !empty($line['product_id'])) {
-                $productId = (int)$line['product_id'];
-            }
-
-            if ($productSlug === '' && !empty($line['slug'])) {
-                $productSlug = trim((string)$line['slug']);
-            }
-
-            $title = strtoupper((string)($line['title'] ?? ''));
-            $period = strtoupper((string)($line['period'] ?? ''));
-            $amount = (float)($line['total'] ?? $line['price'] ?? 0);
-
-            // Setup fees are modeled as separate invoice lines. If a line title
-            // includes SETUP, we treat that amount as non-recurring.
-            if (str_contains($title, 'SETUP')) {
-                $setupFee += $amount;
-                continue;
-            }
-
-            if ($amount > 0) {
-                $recurringAmount += $amount;
-            }
-
-            // Infer the billing key and FOSSBilling period string from invoice text.
-            if ($period !== '' || $title !== '') {
-                [$billingKey, $periodString] = $this->inferBillingKeyAndPeriod($period . ' ' . $title);
-            }
+        if (!$invoice) {
+            $this->debugLog('getInvoiceData() missing invoice');
+            throw new Exception('Invoice data is missing.');
         }
 
-        // If the slug was not embedded in invoice lines, load it from the product.
-        if ($productSlug === '' && $productId > 0) {
-            try {
-                $product = $this->di['db']->getExistingModelById('Product', $productId);
-                $productSlug = trim((string)($product->slug ?? ''));
-            } catch (\Throwable $e) {
-                $productSlug = '';
-            }
+        $invoiceId = (int)($invoice['id'] ?? 0);
+        $currency = strtoupper((string)($invoice['currency'] ?? 'USD'));
+        $total = (float)($invoice['total'] ?? 0);
+
+        $invoiceData = [
+            'id' => $invoiceId,
+            'currency' => $currency,
+            'total' => $total,
+            'amount_minor' => $this->toMinorUnits($total),
+        ];
+
+        $this->debugLog('getInvoiceData() normalized result:');
+        $this->debugLog($invoiceData);
+
+        return $invoiceData;
+    }
+
+    /**
+     * Main transaction entrypoint.
+     *
+     * @param array $data
+     * @return array
+     */
+    public function processTransaction(array $data): array
+    {
+        $this->debugLog('processTransaction() called');
+        $this->debugLog($data);
+
+        $invoiceData = $this->getInvoiceData($data);
+        $sourceToken = (string)($data['source_token'] ?? '');
+
+        if ($sourceToken === '') {
+            $this->debugLog('processTransaction() missing source_token');
+            throw new Exception('Square source token is missing.');
         }
+
+        if ($this->isSubscriptionInvoice($data)) {
+            $this->debugLog('processTransaction() routing to processSubscriptionTransaction()');
+            return $this->processSubscriptionTransaction($data, $invoiceData, $sourceToken);
+        }
+
+        $this->debugLog('processTransaction() routing to processOneTimeTransaction()');
+        return $this->processOneTimeTransaction($data, $invoiceData, $sourceToken);
+    }	
+	/**
+     * Process a one-time Square payment.
+     *
+     * @param array  $data
+     * @param array  $invoiceData
+     * @param string $sourceToken
+     * @return array
+     */
+    protected function processOneTimeTransaction(array $data, array $invoiceData, string $sourceToken): array
+    {
+        $this->debugLog('processOneTimeTransaction() called');
+        $this->debugLog([
+            'invoice_id' => $invoiceData['id'] ?? null,
+            'amount_minor' => $invoiceData['amount_minor'] ?? null,
+            'currency' => $invoiceData['currency'] ?? null,
+        ]);
+
+        $payload = [
+            'idempotency_key' => $this->generateIdempotencyKey('pay_' . $invoiceData['id']),
+            'source_id'       => $sourceToken,
+            'location_id'     => $this->getLocationId(),
+            'amount_money'    => [
+                'amount'   => $invoiceData['amount_minor'],
+                'currency' => $invoiceData['currency'],
+            ],
+            'autocomplete'    => true,
+            'note'            => 'FOSSBilling Invoice #' . $invoiceData['id'],
+        ];
+
+        $response = $this->squarePost(
+            $this->getApiBaseUrl() . '/v2/payments',
+            $payload
+        );
+
+        $this->debugLog('processOneTimeTransaction() Square response:');
+        $this->debugLog($response);
 
         return [
-            'product_id'        => $productId,
-            'product_slug'      => $productSlug,
-            'setup_fee'         => round($setupFee, 2),
-            'recurring_amount'  => round($recurringAmount, 2),
-            'billing_key'       => $billingKey,
-            'period_string'     => $periodString,
-            'square_sku'        => $this->buildSquareSku($productSlug, $billingKey),
+            'status'         => 'processed',
+            'txn_id'         => (string)($response['payment']['id'] ?? ''),
+            'amount'         => $invoiceData['total'],
+            'raw'            => $response,
+            'invoice_id'     => $invoiceData['id'],
+            'gateway_status' => (string)($response['payment']['status'] ?? ''),
         ];
     }
 
     /**
-     * Infer the internal billing key and FOSSBilling period string.
+     * Process a recurring subscription transaction.
      *
-     * Supported billing keys:
-     * - weekly
-     * - monthly
-     * - 3month
-     * - 6month
-     * - yearly
-     * - 2year
-     * - 3year
+     * Flow:
+     * 1. Charge one-time setup fee if needed
+     * 2. Ensure Square customer exists
+     * 3. Store card on file
+     * 4. Resolve mapped subscription plan variation ID
+     * 5. Create subscription
      *
-     * @param string $text Combined invoice period/title text
-     *
-     * @return array{0:string,1:string}
+     * @param array  $data
+     * @param array  $invoiceData
+     * @param string $sourceToken
+     * @return array
      */
-    private function inferBillingKeyAndPeriod(string $text): array
+    protected function processSubscriptionTransaction(array $data, array $invoiceData, string $sourceToken): array
     {
-        $text = strtoupper($text);
+        $this->debugLog('processSubscriptionTransaction() called');
 
-        if (str_contains($text, 'WEEK')) {
-            return ['weekly', '1W'];
+        $subscriptionMeta = $this->extractSubscriptionMeta($data);
+
+        $this->debugLog('processSubscriptionTransaction() extracted subscription meta:');
+        $this->debugLog($subscriptionMeta);
+
+        if ((float)$subscriptionMeta['setup_fee'] > 0) {
+            $this->debugLog('processSubscriptionTransaction() charging setup fee: ' . $subscriptionMeta['setup_fee']);
+
+            $this->chargeSetupFee(
+                $invoiceData,
+                $sourceToken,
+                (float)$subscriptionMeta['setup_fee']
+            );
+        } else {
+            $this->debugLog('processSubscriptionTransaction() no setup fee');
         }
 
-        if (str_contains($text, '3 MONTH')) {
-            return ['3month', '3M'];
+        $customerId = $this->ensureSquareCustomer($data);
+        $this->debugLog('processSubscriptionTransaction() customerId: ' . $customerId);
+
+        $cardId = $this->storeCardOnFile($customerId, $sourceToken);
+        $this->debugLog('processSubscriptionTransaction() cardId: ' . $cardId);
+
+        $planVariationId = $this->resolveMappedPlanVariationId(
+            (int)$subscriptionMeta['product_id'],
+            (string)$subscriptionMeta['billing_key'],
+            (string)$subscriptionMeta['sku']
+        );
+
+        $this->debugLog('processSubscriptionTransaction() mapped planVariationId: ' . ($planVariationId ?: '[empty]'));
+
+        if ($planVariationId === '') {
+            throw new Exception('No Square subscription plan variation ID is mapped for this product/billing period.');
         }
 
-        if (str_contains($text, '6 MONTH')) {
-            return ['6month', '6M'];
-        }
+        $subscription = $this->createSubscription(
+            $customerId,
+            $cardId,
+            $planVariationId,
+            $subscriptionMeta
+        );
 
-        if (str_contains($text, '2 YEAR')) {
-            return ['2year', '2Y'];
-        }
+        $this->debugLog('processSubscriptionTransaction() Square subscription response:');
+        $this->debugLog($subscription);
 
-        if (str_contains($text, '3 YEAR')) {
-            return ['3year', '3Y'];
-        }
-
-        if (str_contains($text, 'YEAR')) {
-            return ['yearly', '1Y'];
-        }
-
-        return ['monthly', '1M'];
+        return [
+            'status'             => 'processed',
+            'txn_id'             => (string)($subscription['subscription']['id'] ?? ''),
+            'amount'             => $invoiceData['total'],
+            'invoice_id'         => $invoiceData['id'],
+            'gateway_status'     => (string)($subscription['subscription']['status'] ?? ''),
+            'subscription_id'    => (string)($subscription['subscription']['id'] ?? ''),
+            'plan_variation_id'  => $planVariationId,
+            'raw'                => $subscription,
+        ];
     }
 
     /**
-     * Build the deterministic Square SKU used across:
-     * - export
-     * - admin mapping UI
-     * - runtime subscription lookup
+     * Charge setup fee as a one-time payment.
      *
-     * Example:
-     *   hosting-basic + monthly => hosting-basic-monthly
-     *
-     * @param string $slug       Base FOSSBilling product slug
-     * @param string $billingKey Billing token
-     *
-     * @return string
+     * @param array  $invoiceData
+     * @param string $sourceToken
+     * @param float  $setupFee
+     * @return array
      */
-    private function buildSquareSku(string $slug, string $billingKey): string
+    protected function chargeSetupFee(array $invoiceData, string $sourceToken, float $setupFee): array
     {
-        $slug = trim(strtolower($slug));
-        $billingKey = trim(strtolower($billingKey));
+        $this->debugLog('chargeSetupFee() called');
+        $this->debugLog([
+            'invoice_id' => $invoiceData['id'] ?? null,
+            'setup_fee' => $setupFee,
+            'currency' => $invoiceData['currency'] ?? null,
+        ]);
 
-        if ($slug === '') {
-            return '';
-        }
+        $payload = [
+            'idempotency_key' => $this->generateIdempotencyKey('setup_' . $invoiceData['id']),
+            'source_id'       => $sourceToken,
+            'location_id'     => $this->getLocationId(),
+            'amount_money'    => [
+                'amount'   => $this->toMinorUnits($setupFee),
+                'currency' => $invoiceData['currency'],
+            ],
+            'autocomplete'    => true,
+            'note'            => 'FOSSBilling Setup Fee for Invoice #' . $invoiceData['id'],
+        ];
 
-        return $slug . '-' . $billingKey;
+        $response = $this->squarePost(
+            $this->getApiBaseUrl() . '/v2/payments',
+            $payload
+        );
+
+        $this->debugLog('chargeSetupFee() response:');
+        $this->debugLog($response);
+
+        return $response;
     }
 /**
-     * Resolve the correct Square subscription plan variation ID.
+     * Extract subscription-related metadata from invoice/request data.
      *
-     * Resolution order:
-     * 1. Ensure the local mapping table exists
-     * 2. Try the locally stored mapping first
-     * 3. If no mapping exists, discover it from Square using the generated SKU
-     * 4. Save the discovered mapping locally for future use
+     * This derives:
+     * - product_id
+     * - billing_key
+     * - recurring SKU
+     * - setup_fee amount
      *
-     * This makes subscription creation both deterministic and efficient:
-     * - first run may discover mapping dynamically
-     * - later runs use the DB cache immediately
-     *
-     * @param int    $productId  FOSSBilling product ID
-     * @param string $billingKey Internal billing key (monthly, yearly, 3month, etc.)
-     * @param string $squareSku  Generated exact Square SKU to look up
-     *
-     * @return string Square subscription plan variation ID, or empty string if not found
+     * @param array $data
+     * @return array
      */
-    private function resolvePlanVariationId(int $productId, string $billingKey, string $squareSku): string
+    protected function extractSubscriptionMeta(array $data): array
     {
-        $this->ensureSquarePlanMapTable();
+        $this->debugLog('extractSubscriptionMeta() called');
+        $this->debugLog($data);
 
-        $mapped = $this->getMappedPlanVariationId($productId, $billingKey);
-        if ($mapped !== '') {
-            return $mapped;
+        $invoice = $data['invoice'] ?? null;
+        if (!$invoice) {
+            $this->debugLog('extractSubscriptionMeta() missing invoice');
+            throw new Exception('Invoice data is missing.');
         }
 
-        $discovered = $this->findSquarePlanVariationIdBySku($squareSku, $billingKey);
-        if ($discovered !== '') {
-            $this->saveMappedPlanVariationId($productId, $billingKey, $squareSku, $discovered);
+        $items = $invoice['items'] ?? [];
+        if (!is_array($items) || !$items) {
+            $this->debugLog('extractSubscriptionMeta() missing items');
+            throw new Exception('Invoice items are missing.');
         }
 
-        return $discovered;
+        $productId = 0;
+
+        foreach ($items as $item) {
+            if (!empty($item['rel_id']) && is_numeric($item['rel_id'])) {
+                $productId = (int)$item['rel_id'];
+                break;
+            }
+
+            if (!empty($item['product_id']) && is_numeric($item['product_id'])) {
+                $productId = (int)$item['product_id'];
+                break;
+            }
+        }
+
+        if ($productId <= 0) {
+            $this->debugLog('extractSubscriptionMeta() could not determine productId');
+            throw new Exception('Unable to determine the product for this subscription invoice.');
+        }
+
+        $product = $this->di['db']->getRow(
+            "SELECT * FROM product WHERE id = :id LIMIT 1",
+            [':id' => $productId]
+        );
+
+        if (!$product) {
+            $this->debugLog('extractSubscriptionMeta() product not found for id=' . $productId);
+            throw new Exception('Product not found for subscription invoice.');
+        }
+
+        $slug = strtolower(trim((string)($product['slug'] ?? '')));
+        if ($slug === '') {
+            $this->debugLog('extractSubscriptionMeta() missing product slug');
+            throw new Exception('Product slug is required for Square subscription mapping.');
+        }
+
+        $payment = $this->di['db']->getRow(
+            "SELECT * FROM product_payment WHERE id = :id LIMIT 1",
+            [':id' => $product['product_payment_id']]
+        );
+
+        if (!$payment) {
+            $this->debugLog('extractSubscriptionMeta() missing product_payment row');
+            throw new Exception('Product payment data not found.');
+        }
+
+        $billingKey = $this->detectBillingKeyFromInvoice($items, $payment);
+        $setupFee = $this->getSetupFeeForBillingKey($payment, $billingKey);
+
+        $meta = [
+            'product_id' => $productId,
+            'billing_key' => $billingKey,
+            'sku' => $slug . '-' . $billingKey,
+            'setup_fee' => $setupFee,
+            'product' => $product,
+            'payment' => $payment,
+        ];
+
+        $this->debugLog('extractSubscriptionMeta() result:');
+        $this->debugLog($meta);
+
+        return $meta;
     }
 
     /**
-     * Ensure the local Square mapping table exists.
+     * Determine which billing key the invoice represents.
      *
-     * Table purpose:
-     * - store the resolved relationship between a FOSSBilling product + billing key
-     *   and the exact Square subscription plan variation ID
-     * - keep a local record of the exact Square SKU used for discovery/debugging
+     * This uses invoice line amounts and enabled payment amounts
+     * to infer the chosen period.
      *
-     * Design:
-     * - product_id + billing_key is the logical unique key
-     * - square_sku is stored for visibility and traceability
-     * - last_discovered_at records when the mapping was auto-found from Square
-     * - updated_at records when the record was last changed
-     */
-    private function ensureSquarePlanMapTable(): void
-    {
-        $sql = "
-            CREATE TABLE IF NOT EXISTS square_product_plan_map (
-                product_id INT UNSIGNED NOT NULL,
-                billing_key VARCHAR(32) NOT NULL,
-                square_sku VARCHAR(191) NOT NULL,
-                square_plan_variation_id VARCHAR(64) NOT NULL,
-                last_discovered_at DATETIME NULL,
-                updated_at DATETIME NULL,
-                PRIMARY KEY (product_id, billing_key)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        ";
-
-        $this->di['db']->exec($sql);
-    }
-
-    /**
-     * Return a stored plan variation ID from the local mapping table.
-     *
-     * This is the preferred lookup path during runtime because it avoids
-     * repeated Square catalog scans once the mapping has already been established.
-     *
-     * @param int    $productId  FOSSBilling product ID
-     * @param string $billingKey Billing key
-     *
+     * @param array $items
+     * @param array $payment
      * @return string
      */
-    private function getMappedPlanVariationId(int $productId, string $billingKey): string
+    protected function detectBillingKeyFromInvoice(array $items, array $payment): string
     {
+        $this->debugLog('detectBillingKeyFromInvoice() called');
+
+        $candidates = [
+            'weekly'  => ['price' => 'w_price',   'enabled' => 'w_enabled'],
+            'monthly' => ['price' => 'm_price',   'enabled' => 'm_enabled'],
+            '3month'  => ['price' => 'q_price',   'enabled' => 'q_enabled'],
+            '6month'  => ['price' => 'b_price',   'enabled' => 'b_enabled'],
+            'yearly'  => ['price' => 'a_price',   'enabled' => 'a_enabled'],
+            '2year'   => ['price' => 'bia_price', 'enabled' => 'bia_enabled'],
+            '3year'   => ['price' => 'tria_price','enabled' => 'tria_enabled'],
+        ];
+
+        $lineAmounts = [];
+
+        foreach ($items as $item) {
+            if (isset($item['price']) && is_numeric($item['price'])) {
+                $lineAmounts[] = (float)$item['price'];
+            } elseif (isset($item['total']) && is_numeric($item['total'])) {
+                $lineAmounts[] = (float)$item['total'];
+            }
+        }
+
+        $this->debugLog('detectBillingKeyFromInvoice() lineAmounts:');
+        $this->debugLog($lineAmounts);
+
+        foreach ($candidates as $billingKey => $map) {
+            $enabled = (int)($payment[$map['enabled']] ?? 0);
+            $price = (float)($payment[$map['price']] ?? 0);
+
+            if ($enabled !== 1 || $price <= 0) {
+                continue;
+            }
+
+            foreach ($lineAmounts as $amount) {
+                if (abs($amount - $price) < 0.01) {
+                    $this->debugLog("detectBillingKeyFromInvoice() matched {$billingKey} via exact amount {$amount}");
+                    return $billingKey;
+                }
+            }
+        }
+
+        // Safe fallback if invoice line matching cannot determine the period.
+        // Prefer monthly when enabled, otherwise first enabled recurring candidate.
+        if ((int)($payment['m_enabled'] ?? 0) === 1 && (float)($payment['m_price'] ?? 0) > 0) {
+            $this->debugLog('detectBillingKeyFromInvoice() fallback to monthly');
+            return 'monthly';
+        }
+
+        foreach ($candidates as $billingKey => $map) {
+            if ((int)($payment[$map['enabled']] ?? 0) === 1 && (float)($payment[$map['price']] ?? 0) > 0) {
+                $this->debugLog("detectBillingKeyFromInvoice() fallback to first enabled candidate {$billingKey}");
+                return $billingKey;
+            }
+        }
+
+        $this->debugLog('detectBillingKeyFromInvoice() failed to determine billing key');
+        throw new Exception('Unable to determine subscription billing period.');
+    }
+
+    /**
+     * Return the setup fee for a given billing key.
+     *
+     * @param array $payment
+     * @param string $billingKey
+     * @return float
+     */
+    protected function getSetupFeeForBillingKey(array $payment, string $billingKey): float
+    {
+        $setupFieldMap = [
+            'weekly'  => 'w_setup_price',
+            'monthly' => 'm_setup_price',
+            '3month'  => 'q_setup_price',
+            '6month'  => 'b_setup_price',
+            'yearly'  => 'a_setup_price',
+            '2year'   => 'bia_setup_price',
+            '3year'   => 'tria_setup_price',
+        ];
+
+        $field = $setupFieldMap[$billingKey] ?? null;
+        if ($field === null) {
+            $this->debugLog('getSetupFeeForBillingKey() no setup field for billingKey=' . $billingKey);
+            return 0.0;
+        }
+
+        $setupFee = (float)($payment[$field] ?? 0);
+
+        $this->debugLog("getSetupFeeForBillingKey() {$billingKey} => {$setupFee}");
+
+        return $setupFee;
+    }
+/**
+     * Ensure a Square customer exists for the current FOSSBilling client.
+     *
+     * @param array $data
+     * @return string Square customer ID
+     */
+    protected function ensureSquareCustomer(array $data): string
+    {
+        $this->debugLog('ensureSquareCustomer() called');
+
+        $client = $data['client'] ?? null;
+
+        if (!$client) {
+            $this->debugLog('ensureSquareCustomer() missing client');
+            throw new Exception('Client data is missing for Square customer creation.');
+        }
+
+        $email = trim((string)($client['email'] ?? ''));
+        $firstName = trim((string)($client['first_name'] ?? ''));
+        $lastName = trim((string)($client['last_name'] ?? ''));
+
+        $this->debugLog([
+            'email' => $email,
+            'first_name' => $firstName,
+            'last_name' => $lastName,
+        ]);
+
+        if ($email === '') {
+            $this->debugLog('ensureSquareCustomer() missing email');
+            throw new Exception('Client email is required for Square customer creation.');
+        }
+
+        // Try to find an existing Square customer by email
+        $searchPayload = [
+            'query' => [
+                'filter' => [
+                    'email_address' => [
+                        'exact' => $email,
+                    ],
+                ],
+            ],
+            'limit' => 1,
+        ];
+
+        $searchResponse = $this->squarePost(
+            $this->getApiBaseUrl() . '/v2/customers/search',
+            $searchPayload
+        );
+
+        $this->debugLog('ensureSquareCustomer() search response:');
+        $this->debugLog($searchResponse);
+
+        if (!empty($searchResponse['customers'][0]['id'])) {
+            $customerId = (string)$searchResponse['customers'][0]['id'];
+            $this->debugLog('ensureSquareCustomer() found existing customerId=' . $customerId);
+
+            return $customerId;
+        }
+
+        // Create a new Square customer
+        $createPayload = [
+            'given_name'    => $firstName,
+            'family_name'   => $lastName,
+            'email_address' => $email,
+        ];
+
+        $createResponse = $this->squarePost(
+            $this->getApiBaseUrl() . '/v2/customers',
+            $createPayload
+        );
+
+        $this->debugLog('ensureSquareCustomer() create response:');
+        $this->debugLog($createResponse);
+
+        $customerId = (string)($createResponse['customer']['id'] ?? '');
+        if ($customerId === '') {
+            $this->debugLog('ensureSquareCustomer() failed to create customer');
+            throw new Exception('Square customer could not be created.');
+        }
+
+        $this->debugLog('ensureSquareCustomer() created customerId=' . $customerId);
+
+        return $customerId;
+    }
+
+    /**
+     * Store a card on file in Square for the customer.
+     *
+     * @param string $customerId
+     * @param string $sourceToken
+     * @return string Square card ID
+     */
+    protected function storeCardOnFile(string $customerId, string $sourceToken): string
+    {
+        $this->debugLog('storeCardOnFile() called');
+        $this->debugLog([
+            'customer_id' => $customerId,
+            'source_token_prefix' => substr($sourceToken, 0, 10) . '...',
+        ]);
+
+        $payload = [
+            'source_id' => $sourceToken,
+            'card' => [
+                'customer_id' => $customerId,
+            ],
+            'idempotency_key' => $this->generateIdempotencyKey('card_' . $customerId),
+        ];
+
+        $response = $this->squarePost(
+            $this->getApiBaseUrl() . '/v2/cards',
+            $payload
+        );
+
+        $this->debugLog('storeCardOnFile() response:');
+        $this->debugLog($response);
+
+        $cardId = (string)($response['card']['id'] ?? '');
+        if ($cardId === '') {
+            $this->debugLog('storeCardOnFile() failed to create card');
+            throw new Exception('Square card on file could not be created.');
+        }
+
+        $this->debugLog('storeCardOnFile() cardId=' . $cardId);
+
+        return $cardId;
+    }
+
+    /**
+     * Resolve a manually stored subscription plan variation ID.
+     *
+     * @param int $productId
+     * @param string $billingKey
+     * @param string $sku
+     * @return string
+     */
+    protected function resolveMappedPlanVariationId(int $productId, string $billingKey, string $sku): string
+    {
+        $this->debugLog('resolveMappedPlanVariationId() called');
+        $this->debugLog([
+            'product_id' => $productId,
+            'billing_key' => $billingKey,
+            'sku' => $sku,
+        ]);
+
         $row = $this->di['db']->getRow(
             "SELECT square_plan_variation_id
              FROM square_product_plan_map
-             WHERE product_id = :product_id AND billing_key = :billing_key
+             WHERE product_id = :product_id
+               AND billing_key = :billing_key
              LIMIT 1",
             [
                 ':product_id' => $productId,
@@ -898,703 +1049,452 @@ HTML;
             ]
         );
 
-        return (string)($row['square_plan_variation_id'] ?? '');
+        $planVariationId = (string)($row['square_plan_variation_id'] ?? '');
+
+        $this->debugLog('resolveMappedPlanVariationId() result=' . ($planVariationId !== '' ? $planVariationId : '[empty]'));
+
+        return $planVariationId;
     }
 
     /**
-     * Save or update a plan variation mapping in the local table.
+     * Create a Square subscription using a stored card and a subscription plan variation.
      *
-     * This is used both for:
-     * - automatic discovery results
-     * - manual overrides from the admin UI module
-     *
-     * @param int    $productId   FOSSBilling product ID
-     * @param string $billingKey  Internal billing key
-     * @param string $squareSku   Exact Square SKU used for the mapping
-     * @param string $variationId Square subscription plan variation ID
+     * @param string $customerId
+     * @param string $cardId
+     * @param string $planVariationId
+     * @param array  $subscriptionMeta
+     * @return array
      */
-    private function saveMappedPlanVariationId(
-        int $productId,
-        string $billingKey,
-        string $squareSku,
-        string $variationId
-    ): void {
-        $exists = $this->di['db']->getRow(
-            "SELECT product_id
-             FROM square_product_plan_map
-             WHERE product_id = :product_id AND billing_key = :billing_key
-             LIMIT 1",
-            [
-                ':product_id' => $productId,
-                ':billing_key' => $billingKey,
-            ]
-        );
+    protected function createSubscription(
+        string $customerId,
+        string $cardId,
+        string $planVariationId,
+        array $subscriptionMeta
+    ): array {
+        $this->debugLog('createSubscription() called');
+        $this->debugLog([
+            'customer_id' => $customerId,
+            'card_id' => $cardId,
+            'plan_variation_id' => $planVariationId,
+            'billing_key' => $subscriptionMeta['billing_key'] ?? '',
+            'sku' => $subscriptionMeta['sku'] ?? '',
+        ]);
 
-        if ($exists) {
-            $sql = "
-                UPDATE square_product_plan_map
-                SET square_sku = :square_sku,
-                    square_plan_variation_id = :variation_id,
-                    last_discovered_at = :last_discovered_at,
-                    updated_at = :updated_at
-                WHERE product_id = :product_id
-                  AND billing_key = :billing_key
-            ";
-        } else {
-            $sql = "
-                INSERT INTO square_product_plan_map
-                    (product_id, billing_key, square_sku, square_plan_variation_id, last_discovered_at, updated_at)
-                VALUES
-                    (:product_id, :billing_key, :square_sku, :variation_id, :last_discovered_at, :updated_at)
-            ";
-        }
-
-        $params = [
-            ':product_id' => $productId,
-            ':billing_key' => $billingKey,
-            ':square_sku' => $squareSku,
-            ':variation_id' => $variationId,
-            ':last_discovered_at' => date('Y-m-d H:i:s'),
-            ':updated_at' => date('Y-m-d H:i:s'),
+        $payload = [
+            'idempotency_key' => $this->generateIdempotencyKey('sub_' . $customerId . '_' . $planVariationId),
+            'location_id' => $this->getLocationId(),
+            'plan_variation_id' => $planVariationId,
+            'customer_id' => $customerId,
+            'card_id' => $cardId,
+            'timezone' => 'America/Chicago',
+            'source' => [
+                'name' => 'FOSSBilling',
+            ],
         ];
 
-        $this->di['db']->exec($sql, $params);
+        $response = $this->squarePost(
+            $this->getApiBaseUrl() . '/v2/subscriptions',
+            $payload
+        );
+
+        $this->debugLog('createSubscription() response:');
+        $this->debugLog($response);
+
+        return $response;
+    }
+/**
+     * Return the current stored Square subscription plan variation mapping
+     * for a product/billing pair.
+     *
+     * @param int $productId
+     * @param string $billingKey
+     * @return string
+     */
+    public function getMappedPlanVariationId(int $productId, string $billingKey): string
+    {
+        $this->debugLog('getMappedPlanVariationId() called');
+        $this->debugLog([
+            'product_id' => $productId,
+            'billing_key' => $billingKey,
+        ]);
+
+        return $this->resolveMappedPlanVariationId($productId, $billingKey, '');
     }
 
     /**
-     * Discover a Square subscription plan variation ID by exact generated SKU.
+     * Try to auto-detect the correct Square subscription plan variation ID
+     * for a recurring billing key.
      *
-     * Discovery strategy:
-     * 1. Load relevant Square catalog objects:
-     *    - ITEM_VARIATION
-     *    - SUBSCRIPTION_PLAN
-     *    - SUBSCRIPTION_PLAN_VARIATION
-     * 2. Find the Square item variation with the exact target SKU
-     * 3. Get the parent catalog item ID from that item variation
-     * 4. Find subscription plans that apply to that item
-     * 5. Find the subscription plan variation under those plans that matches
-     *    the expected billing cadence
+     * IMPORTANT:
+     * - This uses cadence as a helper only.
+     * - If multiple plan variations share the same cadence,
+     *   this returns an empty string so the mapping can be chosen manually.
+     * - 3-year billing does not have a documented Square cadence match,
+     *   so it returns an empty string.
      *
-     * Why this is needed:
-     * - FOSSBilling only gives us the main product slug
-     * - we convert slug + billing key into a deterministic Square SKU
-     * - this lets us bridge from FOSS product → Square item variation →
-     *   Square subscription plan variation
-     *
-     * @param string $squareSku  Exact generated SKU, such as hosting-basic-monthly
-     * @param string $billingKey Internal billing key
-     *
-     * @return string Matching Square subscription plan variation ID, or empty string
+     * @param int $productId
+     * @param string $billingKey
+     * @param string $squareSku
+     * @return string
      */
-    private function findSquarePlanVariationIdBySku(string $squareSku, string $billingKey): string
+    public function discoverPlanVariationId(int $productId, string $billingKey, string $squareSku): string
     {
-        if ($squareSku === '') {
+        $this->debugLog('discoverPlanVariationId() called');
+        $this->debugLog([
+            'product_id' => $productId,
+            'billing_key' => $billingKey,
+            'square_sku' => $squareSku,
+        ]);
+
+        $cadence = $this->mapBillingKeyToSquareCadence($billingKey);
+
+        $this->debugLog('discoverPlanVariationId() mapped cadence=' . ($cadence !== '' ? $cadence : '[empty]'));
+
+        if ($cadence === '') {
+            $this->debugLog('discoverPlanVariationId() no cadence mapping available, returning empty');
             return '';
         }
 
-        $response = $this->squareGet(
-            $this->getApiBaseUrl() . '/v2/catalog/list?types=ITEM_VARIATION,SUBSCRIPTION_PLAN,SUBSCRIPTION_PLAN_VARIATION'
-        );
+        $allObjects = [];
+        $cursor = null;
 
-        $objects = $response['objects'] ?? [];
-        if (!is_array($objects) || !$objects) {
+        do {
+            $url = $this->getApiBaseUrl() . '/v2/catalog/list?types=SUBSCRIPTION_PLAN_VARIATION';
+
+            if ($cursor) {
+                $url .= '&cursor=' . urlencode($cursor);
+            }
+
+            $response = $this->squareGet($url);
+
+            if (!empty($response['objects']) && is_array($response['objects'])) {
+                $allObjects = array_merge($allObjects, $response['objects']);
+            }
+
+            $cursor = $response['cursor'] ?? null;
+
+            $this->debugLog('discoverPlanVariationId() pagination cursor=' . ($cursor ?: 'NONE'));
+        } while ($cursor);
+
+        $this->debugLog('discoverPlanVariationId() total plan variation objects fetched=' . count($allObjects));
+
+        if (!$allObjects) {
+            $this->debugLog('discoverPlanVariationId() no SUBSCRIPTION_PLAN_VARIATION objects found');
             return '';
         }
 
-        $itemId = '';
-        $candidatePlanIds = [];
+        $matches = [];
 
-        // --------------------------------------------------
-        // Step 1: Find the Square item variation with the exact SKU
-        // --------------------------------------------------
-        // Because the generated SKU is deterministic, we avoid weak name matching
-        // and instead use an exact SKU match.
-        foreach ($objects as $obj) {
-            if (($obj['type'] ?? '') !== 'ITEM_VARIATION') {
+        foreach ($allObjects as $object) {
+            if (($object['type'] ?? '') !== 'SUBSCRIPTION_PLAN_VARIATION') {
                 continue;
             }
+			if (!empty($object['is_deleted'])) {
+				continue;
+			}
 
-            $sku = trim((string)($obj['item_variation_data']['sku'] ?? ''));
-            if (strcasecmp($sku, $squareSku) !== 0) {
-                continue;
-            }
+			if (empty($object['present_at_all_locations'])) {
+				continue;
+			}
+            $planData = $object['subscription_plan_variation_data'] ?? [];
+            $phases = $planData['phases'] ?? [];
+            $phaseCadence = (string)($phases[0]['cadence'] ?? '');
+            $id = (string)($object['id'] ?? '');
 
-            $itemId = (string)($obj['item_variation_data']['item_id'] ?? '');
-            break;
-        }
+            $this->debugLog([
+                'discoverPlanVariationId() inspecting object' => [
+                    'id' => $id,
+                    'name' => (string)($planData['name'] ?? ''),
+                    'plan_id' => (string)($planData['subscription_plan_id'] ?? ''),
+                    'phase_cadence' => $phaseCadence,
+                ],
+            ]);
 
-        if ($itemId === '') {
-            return '';
-        }
-
-        // --------------------------------------------------
-        // Step 2: Find subscription plans linked to that item
-        // --------------------------------------------------
-        // A Square subscription plan can either:
-        // - explicitly list eligible_item_ids
-        // - or apply to all items
-        foreach ($objects as $obj) {
-            if (($obj['type'] ?? '') !== 'SUBSCRIPTION_PLAN') {
-                continue;
-            }
-
-            $planId = (string)($obj['id'] ?? '');
-            $eligibleItems = $obj['subscription_plan_data']['eligible_item_ids'] ?? [];
-            $allItems = (bool)($obj['subscription_plan_data']['all_items'] ?? false);
-
-            if (
-                $planId !== '' &&
-                ($allItems || (is_array($eligibleItems) && in_array($itemId, $eligibleItems, true)))
-            ) {
-                $candidatePlanIds[] = $planId;
+            if ($phaseCadence === $cadence) {
+                $matches[] = $id;
             }
         }
 
-        if (!$candidatePlanIds) {
-            return '';
+        $this->debugLog('discoverPlanVariationId() cadence matches:');
+        $this->debugLog($matches);
+
+        // Only auto-match when exactly one plan variation matches the cadence.
+        if (count($matches) === 1) {
+            $this->debugLog('discoverPlanVariationId() returning unique match=' . $matches[0]);
+            return $matches[0];
         }
 
-        // --------------------------------------------------
-        // Step 3: Find the matching subscription plan variation
-        // --------------------------------------------------
-        // We use the internal billing key to decide which Square cadence(s) are
-        // acceptable for this lookup.
-        $allowedCadences = $this->getAllowedCadencesForBillingKey($billingKey);
-
-        foreach ($objects as $obj) {
-            if (($obj['type'] ?? '') !== 'SUBSCRIPTION_PLAN_VARIATION') {
-                continue;
-            }
-
-            $variationId = (string)($obj['id'] ?? '');
-            $planId = (string)($obj['subscription_plan_variation_data']['subscription_plan_id'] ?? '');
-            $phaseCadence = strtoupper(
-                (string)($obj['subscription_plan_variation_data']['phases'][0]['cadence'] ?? '')
-            );
-
-            if ($variationId === '' || $planId === '') {
-                continue;
-            }
-
-            if (!in_array($planId, $candidatePlanIds, true)) {
-                continue;
-            }
-
-            if (in_array($phaseCadence, $allowedCadences, true)) {
-                return $variationId;
-            }
-        }
+        $this->debugLog('discoverPlanVariationId() returning empty because match count=' . count($matches));
 
         return '';
     }
 
     /**
-     * Return allowed Square cadence values for a given internal billing key.
+     * Map internal FOSSBilling billing keys to documented Square subscription cadence values.
      *
-     * This exists because Square cadence labels and FOSSBilling billing periods
-     * are not always named exactly the same way.
+     * Supported:
+     * - weekly  -> WEEKLY
+     * - monthly -> MONTHLY
+     * - 3month  -> QUARTERLY
+     * - 6month  -> EVERY_SIX_MONTHS
+     * - yearly  -> ANNUAL
+     * - 2year   -> EVERY_TWO_YEARS
      *
-     * Examples:
-     * - monthly  → MONTHLY
-     * - yearly   → ANNUAL / YEARLY
-     * - 3month   → QUARTERLY / EVERY_THREE_MONTHS
+     * Unsupported:
+     * - 3year -> no documented Square cadence match
      *
-     * @param string $billingKey Internal billing key
-     *
-     * @return array<int, string>
+     * @param string $billingKey
+     * @return string
      */
-    private function getAllowedCadencesForBillingKey(string $billingKey): array
+    private function mapBillingKeyToSquareCadence(string $billingKey): string
     {
-        return match (strtolower($billingKey)) {
-            'weekly'  => ['WEEKLY'],
-            'monthly' => ['MONTHLY'],
-            '3month'  => ['EVERY_THREE_MONTHS', 'QUARTERLY', 'THREE_MONTHS'],
-            '6month'  => ['EVERY_SIX_MONTHS', 'SEMIANNUALLY', 'BIANNUAL', 'SIX_MONTHS'],
-            'yearly'  => ['ANNUAL', 'YEARLY'],
-            '2year'   => ['EVERY_TWO_YEARS', 'TWO_YEARS'],
-            '3year'   => ['EVERY_THREE_YEARS', 'THREE_YEARS'],
-            default   => ['MONTHLY'],
+        $mapped = match ($billingKey) {
+            'weekly'  => 'WEEKLY',
+            'monthly' => 'MONTHLY',
+            '3month'  => 'QUARTERLY',
+            '6month'  => 'EVERY_SIX_MONTHS',
+            'yearly'  => 'ANNUAL',
+            '2year'   => 'EVERY_TWO_YEARS',
+            default   => '',
         };
+
+        $this->debugLog("mapBillingKeyToSquareCadence() {$billingKey} => " . ($mapped !== '' ? $mapped : '[empty]'));
+
+        return $mapped;
     }
 /**
-     * Find an existing Square customer by email, or create a new one.
+     * Return Square catalog inspection data:
+     * - item variations (from item library / CSV import)
+     * - subscription plan variations (used for recurring subscriptions)
      *
-     * Why this exists:
-     * - Square subscriptions must be associated with a Square customer
-     * - the saved card on file is attached to that customer
+     * This supports the Square Manager admin inspection utility.
      *
-     * Lookup strategy:
-     * 1. If the client has an email address, search Square for an existing customer
-     * 2. If found, reuse that customer
-     * 3. Otherwise, create a new customer in Square
-     *
-     * @param object $client FOSSBilling client model
-     *
-     * @return string Square customer ID
-     *
-     * @throws Payment_Exception When Square does not return a valid customer ID
+     * @return array<string, array<int, array<string, mixed>>>
      */
-    private function findOrCreateSquareCustomer($client): string
+    public function listSquareObjectsForInspection(): array
     {
-        $email = trim((string)($client->email ?? ''));
+        $this->debugLog('listSquareObjectsForInspection() START');
 
-        if ($email !== '') {
-            $searchResponse = $this->squarePost(
-                $this->getApiBaseUrl() . '/v2/customers/search',
-                [
-                    'query' => [
-                        'filter' => [
-                            'email_address' => [
-                                'exact' => $email,
-                            ],
-                        ],
-                    ],
-                ]
-            );
+        $allObjects = [];
+        $cursor = null;
 
-            if (!empty($searchResponse['customers'][0]['id'])) {
-                return (string)$searchResponse['customers'][0]['id'];
+        do {
+            $url = $this->getApiBaseUrl() . '/v2/catalog/list?types=ITEM,ITEM_VARIATION,SUBSCRIPTION_PLAN_VARIATION';
+
+            if ($cursor) {
+                $url .= '&cursor=' . urlencode($cursor);
+            }
+
+            $this->debugLog('listSquareObjectsForInspection() request URL: ' . $url);
+
+            $response = $this->squareGet($url);
+
+            $this->debugLog('listSquareObjectsForInspection() page response:');
+            $this->debugLog($response);
+
+            if (!empty($response['objects']) && is_array($response['objects'])) {
+                $allObjects = array_merge($allObjects, $response['objects']);
+            }
+
+            $cursor = $response['cursor'] ?? null;
+            $this->debugLog('listSquareObjectsForInspection() cursor=' . ($cursor ?: 'NONE'));
+        } while ($cursor);
+
+        $this->debugLog('listSquareObjectsForInspection() total fetched objects=' . count($allObjects));
+
+        if (!$allObjects) {
+            $this->debugLog('listSquareObjectsForInspection() no objects found');
+
+            return [
+                'item_variations' => [],
+                'plan_variations' => [],
+            ];
+        }
+
+        $itemNames = [];
+        $itemVariations = [];
+        $planVariations = [];
+
+        // First pass: collect ITEM names by ID
+        foreach ($allObjects as $object) {
+            if (($object['type'] ?? '') !== 'ITEM') {
+                continue;
+            }
+
+            $itemId = (string)($object['id'] ?? '');
+            $itemName = (string)($object['item_data']['name'] ?? '');
+
+            if ($itemId !== '') {
+                $itemNames[$itemId] = $itemName;
             }
         }
 
-        $payload = array_filter([
-            'given_name'    => (string)($client->first_name ?? ''),
-            'family_name'   => (string)($client->last_name ?? ''),
-            'email_address' => $email !== '' ? $email : null,
-            'phone_number'  => trim((string)($client->phone_cc ?? '') . (string)($client->phone ?? '')),
-            'reference_id'  => 'fossbilling-client-' . (string)$client->id,
-            'note'          => 'Created by FOSSBilling Square adapter',
-        ], static fn($v) => $v !== null && $v !== '');
+        $this->debugLog('listSquareObjectsForInspection() collected item names:');
+        $this->debugLog($itemNames);
 
-        $response = $this->squarePost($this->getApiBaseUrl() . '/v2/customers', $payload);
+        // Second pass: collect ITEM_VARIATION and SUBSCRIPTION_PLAN_VARIATION rows
+        foreach ($allObjects as $object) {
+            $type = (string)($object['type'] ?? '');
 
-        if (empty($response['customer']['id'])) {
-            throw new Payment_Exception('Could not create Square customer');
-        }
+            if ($type === 'ITEM_VARIATION') {
+                $variationData = $object['item_variation_data'] ?? [];
+                $itemId = (string)($variationData['item_id'] ?? '');
 
-        return (string)$response['customer']['id'];
-    }
+                $row = [
+                    'id' => (string)($object['id'] ?? ''),
+                    'item_name' => (string)($itemNames[$itemId] ?? ''),
+                    'variation_name' => (string)($variationData['name'] ?? ''),
+                    'sku' => (string)($variationData['sku'] ?? ''),
+                    'price' => (int)($variationData['price_money']['amount'] ?? 0),
+                ];
 
-    /**
-     * Save a tokenized Square card to the customer's card-on-file list.
-     *
-     * Why this exists:
-     * - Square subscriptions charge a stored card on file
-     * - the browser token (source_id) is single-use and cannot be used as the
-     *   recurring billing source directly
-     *
-     * Sandbox note:
-     * - Square sandbox card save flows often require postal code 94103 for testing
-     *
-     * @param string $customerId Square customer ID
-     * @param object $client     FOSSBilling client model
-     * @param string $sourceId   Tokenized browser card source
-     *
-     * @return string Saved Square card ID
-     *
-     * @throws Payment_Exception When Square does not return a valid card ID
-     */
-    private function createCardOnFileFromNonce(string $customerId, $client, string $sourceId): string
-    {
-        $cardholderName = trim(
-            (string)($client->first_name ?? '') . ' ' . (string)($client->last_name ?? '')
-        );
-
-        $payload = [
-            'idempotency_key' => bin2hex(random_bytes(16)),
-            'source_id'       => $sourceId,
-            'card' => [
-                'customer_id'     => $customerId,
-                'cardholder_name' => $cardholderName,
-                'reference_id'    => 'fossbilling-client-' . (string)$client->id,
-                'billing_address' => [
-                    'postal_code' => $this->isTestMode() ? '94103' : (string)($client->zip ?? ''),
-                    'country'     => 'US',
-                ],
-            ],
-        ];
-
-        $response = $this->squarePost($this->getApiBaseUrl() . '/v2/cards', $payload);
-
-        if (!empty($response['errors'])) {
-            throw new Payment_Exception(
-                'Square create card failed: ' .
-                json_encode($response['errors'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
-            );
-        }
-
-        if (empty($response['card']['id'])) {
-            throw new Payment_Exception('Square create card response missing card ID');
-        }
-
-        return (string)$response['card']['id'];
-    }
-
-    /**
-     * Create a Square subscription.
-     *
-     * Inputs required by Square:
-     * - location_id
-     * - customer_id
-     * - plan_variation_id
-     * - card_id
-     *
-     * Note:
-     * - If your Square plan variation uses RELATIVE pricing, Square may require
-     *   additional phase/order-template data beyond this basic payload.
-     *
-     * @param string $customerId      Square customer ID
-     * @param string $cardId          Square saved card ID
-     * @param string $planVariationId Square subscription plan variation ID
-     *
-     * @return array Raw Square API response
-     */
-    private function createSquareSubscription(string $customerId, string $cardId, string $planVariationId): array
-    {
-        $payload = [
-            'idempotency_key'   => bin2hex(random_bytes(16)),
-            'location_id'       => $this->getLocationId(),
-            'customer_id'       => $customerId,
-            'plan_variation_id' => $planVariationId,
-            'card_id'           => $cardId,
-        ];
-
-        return $this->squarePost($this->getApiBaseUrl() . '/v2/subscriptions', $payload);
-    }
-
-    /**
-     * Create a one-time Square payment.
-     *
-     * This is used for:
-     * - normal one-time invoice payments
-     * - optional setup fee charges before creating subscriptions
-     *
-     * @param string $sourceId     Square tokenized card source
-     * @param int    $amountCents  Amount in the smallest currency unit
-     * @param string $currency     ISO currency code
-     * @param string $note         Human-readable note stored in Square
-     * @param string $referenceId  Reference stored in Square for reconciliation
-     *
-     * @return array Raw Square API response
-     */
-    private function createSquarePayment(
-        string $sourceId,
-        int $amountCents,
-        string $currency,
-        string $note,
-        string $referenceId
-    ): array {
-        $payload = [
-            'source_id' => $sourceId,
-            'idempotency_key' => bin2hex(random_bytes(16)),
-            'amount_money' => [
-                'amount' => $amountCents,
-                'currency' => strtoupper($currency),
-            ],
-            'location_id' => $this->getLocationId(),
-            'reference_id' => $referenceId,
-            'note' => $note,
-        ];
-
-        return $this->squarePost($this->getApiBaseUrl() . '/v2/payments', $payload);
-    }
-
-    /**
-     * Process a Square webhook callback.
-     *
-     * Supported event categories:
-     * - subscription.created / subscription.updated
-     * - payment.created / payment.updated / invoice.payment_made
-     *
-     * Why this exists:
-     * - keep FOSSBilling subscription status aligned with Square
-     * - confirm and apply one-time payments asynchronously from Square events
-     *
-     * @param mixed  $api_admin       FOSSBilling admin API instance
-     * @param object $tx              Transaction model
-     * @param string $rawBody         Raw webhook JSON
-     * @param string $headerSignature Square webhook signature header
-     * @param int    $gateway_id      Payment gateway ID
-     *
-     * @throws Payment_Exception When signature validation or payload validation fails
-     */
-    private function handleWebhook($api_admin, $tx, string $rawBody, string $headerSignature, int $gateway_id): void
-    {
-        $signatureKey = $this->getWebhookSignatureKey();
-        $notificationUrl = (string)($this->config['notify_url'] ?? '');
-
-        if ($signatureKey === '' || $notificationUrl === '') {
-            throw new Payment_Exception('Square webhook config is incomplete');
-        }
-
-        if (!$this->isValidWebhookSignature($notificationUrl, $rawBody, $headerSignature, $signatureKey)) {
-            throw new Payment_Exception('Square webhook signature validation failed');
-        }
-
-        $payload = json_decode($rawBody, true);
-        if (!is_array($payload)) {
-            throw new Payment_Exception('Square webhook payload is invalid JSON');
-        }
-
-        $eventType = (string)($payload['type'] ?? '');
-        if ($eventType === '') {
-            return;
-        }
-
-        // --------------------------------------------------
-        // Subscription status synchronization
-        // --------------------------------------------------
-        // When Square updates a subscription status, reflect it in the local
-        // FOSSBilling subscription record where possible.
-        if (in_array($eventType, ['subscription.created', 'subscription.updated'], true)) {
-            $subscriptionId = (string)($payload['data']['object']['subscription']['id'] ?? '');
-            $subscriptionStatus = (string)($payload['data']['object']['subscription']['status'] ?? '');
-
-            if ($subscriptionId !== '') {
-                try {
-                    $subscription = $api_admin->invoice_subscription_get(['sid' => $subscriptionId]);
-
-                    if (!empty($subscription['id'])) {
-                        $mappedStatus = 'active';
-                        $normalized = strtoupper($subscriptionStatus);
-
-                        if (in_array($normalized, ['CANCELED', 'DEACTIVATED', 'PAUSED'], true)) {
-                            $mappedStatus = 'canceled';
-                        } elseif ($normalized === 'PENDING') {
-                            $mappedStatus = 'pending';
-                        }
-
-                        $api_admin->invoice_subscription_update([
-                            'id'     => $subscription['id'],
-                            'status' => $mappedStatus,
-                        ]);
-                    }
-                } catch (\Throwable $e) {
-                    // It is valid for a webhook to arrive before the local side
-                    // has fully stored the subscription. In that case we ignore
-                    // the sync attempt rather than breaking the webhook flow.
-                }
+                $itemVariations[] = $row;
             }
 
-            return;
+            
+				if ($type === 'SUBSCRIPTION_PLAN_VARIATION') {
+
+					// ✅ Skip deleted
+					if (!empty($object['is_deleted'])) {
+						continue;
+					}
+
+					// ✅ Skip not active across locations (your requirement)
+					if (empty($object['present_at_all_locations'])) {
+						continue;
+					}
+
+					$planData = $object['subscription_plan_variation_data'] ?? [];
+					$phases = $planData['phases'] ?? [];
+
+					// ✅ Require a cadence
+					if (empty($phases[0]['cadence'])) {
+						continue;
+					}
+
+					$row = [
+						'id' => (string)($object['id'] ?? ''),
+						'name' => (string)($planData['name'] ?? ''),
+						'plan_id' => (string)($planData['subscription_plan_id'] ?? ''),
+						'cadence' => (string)($phases[0]['cadence'] ?? ''),
+					];
+
+					$planVariations[] = $row;
+				}
+
         }
 
-        // If the webhook is unrelated to payments or subscriptions we simply
-        // ignore it.
-        if (!in_array($eventType, ['payment.created', 'payment.updated', 'invoice.payment_made'], true)) {
-            return;
-        }
+        $result = [
+            'item_variations' => $itemVariations,
+            'plan_variations' => $planVariations,
+        ];
 
-        $paymentId = (string)($payload['data']['object']['payment']['id'] ?? '');
-        if ($paymentId === '') {
-            return;
-        }
+        $this->debugLog('listSquareObjectsForInspection() final result:');
+        $this->debugLog($result);
 
-        // --------------------------------------------------
-        // Payment verification
-        // --------------------------------------------------
-        // We re-fetch the payment from Square using the payment ID rather than
-        // trusting the minimal webhook payload blindly.
-        $verified = $this->retrieveSquarePayment($paymentId);
-        $payment = $verified['payment'] ?? null;
-
-        if (!is_array($payment) || empty($payment['id'])) {
-            throw new Payment_Exception('Square webhook verification failed');
-        }
-
-        // Attempt to recover the invoice ID from the existing transaction or
-        // from the Square reference ID.
-        $invoiceId =
-            ($tx->invoice_id ?? null)
-            ?: (int)($payment['reference_id'] ?? 0)
-            ?: (int)($payload['data']['object']['payment']['reference_id'] ?? 0)
-            ?: 0;
-
-        if ($invoiceId > 0) {
-            $invoice = $this->di['db']->getExistingModelById('Invoice', $invoiceId);
-
-            $tx->invoice_id = $invoice->id;
-            $tx->txn_id = (string)$payment['id'];
-            $tx->txn_status = (string)($payment['status'] ?? 'UNKNOWN');
-            $tx->amount = ((float)($payment['amount_money']['amount'] ?? 0)) / 100;
-            $tx->currency = (string)($payment['amount_money']['currency'] ?? $invoice->currency);
-
-            if (($payment['status'] ?? '') === 'COMPLETED') {
-                $this->applySuccessfulPayment($tx, $invoice, (float)$tx->amount, (string)$payment['id']);
-            } elseif (in_array(($payment['status'] ?? ''), ['FAILED', 'CANCELED'], true)) {
-                $tx->status = 'error';
-                $tx->error = 'Square webhook reported payment status: ' . (string)$payment['status'];
-            } else {
-                $tx->status = 'received';
-            }
-
-            $tx->updated_at = date('Y-m-d H:i:s');
-            $this->di['db']->store($tx);
-        }
+        return $result;
     }
 
     /**
-     * Validate a Square webhook signature.
+     * Optional helper for older code paths that expect a simple variation listing method.
      *
-     * Square signs:
-     *   notification_url + raw_body
+     * This returns only item-library variations, not subscription plan variations.
      *
-     * using HMAC SHA-256 and base64 encoding.
+     * @return array<int, array<string, mixed>>
+     */
+    public function listCatalogVariations(): array
+    {
+        $this->debugLog('listCatalogVariations() called');
+
+        $all = $this->listSquareObjectsForInspection();
+
+        $result = $all['item_variations'] ?? [];
+
+        $this->debugLog('listCatalogVariations() result count=' . count($result));
+
+        return $result;
+    }
+
+    /**
+     * Legacy-compatible wrapper retained for code paths that still call
+     * resolvePlanVariationId() instead of discoverPlanVariationId().
      *
-     * @param string $notificationUrl Full notify URL configured in Square
-     * @param string $rawBody         Raw webhook request body
-     * @param string $headerSignature Signature from request header
-     * @param string $signatureKey    Square webhook signature key
+     * @param int $productId
+     * @param string $billingKey
+     * @param string $squareSku
+     * @return string
+     */
+    public function resolvePlanVariationId(int $productId, string $billingKey, string $squareSku): string
+    {
+        $this->debugLog('resolvePlanVariationId() wrapper called');
+
+        return $this->discoverPlanVariationId($productId, $billingKey, $squareSku);
+    }
+/**
+     * Process Square webhook notifications if needed.
+     *
+     * This is optional / minimal here. You can expand this later
+     * if you want automatic payment or subscription status sync.
+     *
+     * @param array $data
+     * @return array
+     */
+    public function processIpn(array $data): array
+    {
+        $this->debugLog('processIpn() called');
+        $this->debugLog($data);
+
+        return [
+            'status' => 'ok',
+            'raw' => $data,
+        ];
+    }
+
+    /**
+     * Refund support placeholder.
+     *
+     * Expand later if you want admin-side Square refunds via API.
+     *
+     * @param array $data
+     * @return bool
+     */
+    public function refund(array $data): bool
+    {
+        $this->debugLog('refund() called');
+        $this->debugLog($data);
+
+        return false;
+    }
+
+    /**
+     * Return whether the adapter supports refunds directly.
      *
      * @return bool
      */
-    private function isValidWebhookSignature(
-        string $notificationUrl,
-        string $rawBody,
-        string $headerSignature,
-        string $signatureKey
-    ): bool {
-        $expected = base64_encode(
-            hash_hmac('sha256', $notificationUrl . $rawBody, $signatureKey, true)
-        );
-
-        return hash_equals($expected, trim($headerSignature));
+    public function supportsRefunds(): bool
+    {
+        return false;
     }
 
     /**
-     * Retrieve a payment directly from Square by payment ID.
-     *
-     * This is used during webhook processing to verify payment state with
-     * a fresh API call.
-     *
-     * @param string $paymentId Square payment ID
+     * Return adapter features summary.
      *
      * @return array
      */
-    private function retrieveSquarePayment(string $paymentId): array
+    public function getFeatures(): array
     {
-        return $this->squareGet($this->getApiBaseUrl() . '/v2/payments/' . rawurlencode($paymentId));
-    }
+        $features = [
+            'one_time_payments' => true,
+            'subscriptions' => true,
+            'setup_fees' => true,
+            'refunds' => false,
+            'debug_enabled' => $this->debugEnabled,
+            'debug_log_file' => $this->debugLogFile,
+        ];
 
-    /**
-     * Execute a Square GET request and decode JSON response.
-     *
-     * @param string $endpoint Full Square API URL
-     *
-     * @return array
-     *
-     * @throws Payment_Exception On network or invalid JSON errors
-     */
-    private function squareGet(string $endpoint): array
-    {
-        $ch = curl_init($endpoint);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => [
-                'Authorization: Bearer ' . $this->getAccessToken(),
-                'Accept: application/json',
-                'Square-Version: 2026-05-20',
-            ],
-            CURLOPT_TIMEOUT => 60,
-        ]);
+        $this->debugLog('getFeatures() called');
+        $this->debugLog($features);
 
-        $response = curl_exec($ch);
-        $errno = curl_errno($ch);
-        $error = curl_error($ch);
-        $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        if ($errno) {
-            throw new Payment_Exception('Square cURL error: ' . $error);
-        }
-
-        $decoded = json_decode((string)$response, true);
-        if (!is_array($decoded)) {
-            throw new Payment_Exception('Square returned invalid JSON. HTTP ' . $httpCode);
-        }
-
-        return $decoded;
-    }
-
-    /**
-     * Execute a Square POST request and decode JSON response.
-     *
-     * @param string $endpoint Full Square API URL
-     * @param array  $payload  JSON payload to send
-     *
-     * @return array
-     *
-     * @throws Payment_Exception On network or invalid JSON errors
-     */
-    private function squarePost(string $endpoint, array $payload): array
-    {
-        $ch = curl_init($endpoint);
-        curl_setopt_array($ch, [
-            CURLOPT_POST => true,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => [
-                'Authorization: Bearer ' . $this->getAccessToken(),
-                'Content-Type: application/json',
-                'Accept: application/json',
-                'Square-Version: 2026-05-20',
-            ],
-            CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_SLASHES),
-            CURLOPT_TIMEOUT => 60,
-        ]);
-
-        $response = curl_exec($ch);
-        $errno = curl_errno($ch);
-        $error = curl_error($ch);
-        $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        if ($errno) {
-            throw new Payment_Exception('Square cURL error: ' . $error);
-        }
-
-        $decoded = json_decode((string)$response, true);
-        if (!is_array($decoded)) {
-            throw new Payment_Exception('Square returned invalid JSON. HTTP ' . $httpCode);
-        }
-
-        return $decoded;
-    }
-
-    /**
-     * Apply a successful payment to the client/invoice inside FOSSBilling.
-     *
-     * This method:
-     * - adds the received payment as client funds/transaction record
-     * - attempts to pay the invoice using credits unless it is a pure deposit invoice
-     * - marks the local transaction status as processed
-     *
-     * @param object $tx              Transaction model
-     * @param object $invoice         Invoice model
-     * @param float  $amount          Paid amount in invoice currency
-     * @param string $squarePaymentId Square payment ID for traceability
-     */
-    private function applySuccessfulPayment($tx, $invoice, float $amount, string $squarePaymentId): void
-    {
-        $clientService = $this->di['mod_service']('Client');
-        $invoiceService = $this->di['mod_service']('Invoice');
-        $client = $this->di['db']->getExistingModelById('Client', $invoice->client_id);
-
-        $clientService->addFunds(
-            $client,
-            $amount,
-            'Square payment ' . $squarePaymentId,
-            [
-                'amount' => $amount,
-                'description' => 'Square transaction ' . $squarePaymentId,
-                'type' => 'transaction',
-                'rel_id' => $tx->id,
-            ]
-        );
-
-        if (!$invoiceService->isInvoiceTypeDeposit($invoice)) {
-            $invoiceService->payInvoiceWithCredits($invoice);
-        }
-
-        $tx->status = 'processed';
+        return $features;
     }
 }	
