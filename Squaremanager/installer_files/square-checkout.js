@@ -5,127 +5,157 @@
  * - Initialize the Square Web Payments SDK
  * - Attach card input UI to the DOM
  * - Tokenize card details securely
- * - Submit the token (source_id) to backend form
+ * - Submit the token directly to FOSSBilling's guest invoice payment API
  *
  * Important:
  * - This script NEVER handles raw card data directly
  * - Square SDK handles PCI compliance and secure tokenization
- * - Backend receives only a token (source_id), not card details
+ * - Backend receives only a token (source_token), not card details
  *
- * Flow:
- * 1. Detect payment container(s) on page
- * 2. Initialize Square SDK using application + location IDs
- * 3. Attach card UI form
- * 4. On button click:
- *      → tokenize card
- *      → populate hidden form field
- *      → submit form to backend
+ * Requirements from getHtml():
+ * - window.squareConfig must contain:
+ *     - applicationId
+ *     - locationId
+ *     - invoiceId
+ *     - gatewayId
+ *     - environment
+ * - HTML must contain:
+ *     - #square-checkout-root
+ *     - #square-card-container
+ *     - #square-pay-button
+ *     - #square-payment-status
  */
 
 (function () {
-
-    /**
-     * Display an error or status message in the UI
-     *
-     * @param {HTMLElement} root Root payment container
-     * @param {string} message Message to display
-     */
     function setStatus(root, message) {
         const el = root.querySelector('#square-payment-status');
-        if (el) el.textContent = message || '';
+        if (el) {
+            el.textContent = message || '';
+        }
     }
 
-    /**
-     * Initialize a single Square payment container
-     *
-     * This method:
-     * - reads configuration from data attributes
-     * - initializes the Square Web Payments SDK
-     * - attaches card input UI
-     * - sets up click handler to tokenize and submit form
-     *
-     * @param {HTMLElement} root Container element
-     */
-    function initRoot(root) {
+    async function processPayment(token) {
+        if (!window.squareConfig) {
+            throw new Error('window.squareConfig is missing');
+        }
 
-        // Prevent multiple initialization on same element
+        if (!window.squareConfig.invoiceId) {
+            throw new Error('invoiceId is missing from window.squareConfig');
+        }
+
+        if (!window.squareConfig.gatewayId) {
+            throw new Error('gatewayId is missing from window.squareConfig');
+        }
+
+        const payload = {
+            invoice_id: window.squareConfig.invoiceId,
+            gateway_id: window.squareConfig.gatewayId,
+            source_token: token
+        };
+
+        console.log('[Square] processPayment payload', payload);
+
+        const response = await fetch('/index.php?_url=/api/guest/invoice/process_payment', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            credentials: 'same-origin',
+            body: JSON.stringify(payload)
+        });
+
+        let data = null;
+        const rawText = await response.text();
+
+        try {
+            data = rawText ? JSON.parse(rawText) : null;
+        } catch (err) {
+            console.error('[Square] Failed to parse API response as JSON', err, rawText);
+            throw new Error('Invalid API response from server');
+        }
+
+        console.log('[Square] API response', data);
+
+        if (!response.ok) {
+            const message =
+                (data && data.error && (data.error.message || data.error)) ||
+                ('HTTP ' + response.status);
+            throw new Error(message);
+        }
+
+        if (data && data.error) {
+            throw new Error(data.error.message || 'Payment API returned an error');
+        }
+
+        return data;
+    }
+
+    function initRoot(root) {
         if (!root || root.dataset.squareInitialized === '1') return;
         root.dataset.squareInitialized = '1';
 
-        // Read config from HTML data attributes
-        const appId = root.getAttribute('data-square-application-id');
-        const locationId = root.getAttribute('data-square-location-id');
-        const action = root.getAttribute('data-square-action');
+        console.log('[Square] initRoot called', root);
 
-        // Required DOM elements
-        const form = root.querySelector('#square-payment-form');
+        const appId = root.getAttribute('data-square-application-id') || (window.squareConfig && window.squareConfig.applicationId);
+        const locationId = root.getAttribute('data-square-location-id') || (window.squareConfig && window.squareConfig.locationId);
+
         const button = root.querySelector('#square-pay-button');
-        const sourceInput = root.querySelector('#square_source_id');
-        const actionInput = root.querySelector('#square_action');
         const cardContainer = root.querySelector('#square-card-container');
 
-        // Ensure required elements exist before proceeding
-        if (!form || !button || !sourceInput || !actionInput || !cardContainer) return;
+        console.log('[Square] config', {
+            appId,
+            locationId,
+            squareConfig: window.squareConfig || null
+        });
 
-        // Ensure Square SDK loaded successfully
-        if (!window.Square) {
+        console.log('[Square] elements', {
+            button,
+            cardContainer
+        });
+
+        if (!button || !cardContainer) {
+            console.error('[Square] Missing required payment elements');
+            return;
+        }
+
+        if (!window.Square || typeof window.Square.payments !== 'function') {
+            console.error('[Square] window.Square missing or invalid');
             setStatus(root, 'Square SDK unavailable');
             return;
         }
 
-        // Async IIFE to use async/await cleanly
+        if (!appId || !locationId) {
+            console.error('[Square] Missing applicationId or locationId');
+            setStatus(root, 'Square configuration is incomplete');
+            return;
+        }
+
         (async function () {
             try {
-                /**
-                 * Initialize Square payments instance
-                 *
-                 * This binds the application ID and location ID
-                 * to create a payment session.
-                 */
                 const payments = window.Square.payments(appId, locationId);
-
-                /**
-                 * Create card element and attach to DOM
-                 *
-                 * Square renders secure iframe inputs here
-                 * for card number, CVV, expiration, etc.
-                 */
                 const card = await payments.card();
                 await card.attach(cardContainer);
 
-                // Ensure correct backend action value is set
-                actionInput.value = action;
+                console.log('[Square] card attached');
 
-                /**
-                 * Payment button click handler
-                 *
-                 * Flow:
-                 * 1. Tokenize card
-                 * 2. If success → store token
-                 * 3. Submit form to backend
-                 */
-                button.addEventListener('click', async function () {
+                button.addEventListener('click', async function (event) {
+                    event.preventDefault();
+                    event.stopPropagation();
 
                     setStatus(root, '');
                     button.disabled = true;
 
                     try {
                         const result = await card.tokenize();
+                        console.log('[Square] tokenize result', result);
 
-                        /**
-                         * Handle tokenization failure
-                         *
-                         * Possible reasons:
-                         * - invalid card details
-                         * - incomplete fields
-                         * - network errors
-                         */
                         if (result.status !== 'OK') {
-
                             let message = 'Unable to tokenize card details.';
 
                             if (result.errors && result.errors.length) {
-                                message += ' ' + result.errors.map(e => e.message).join('; ');
+                                message += ' ' + result.errors.map(function (e) {
+                                    return e.message;
+                                }).join('; ');
                             }
 
                             setStatus(root, message);
@@ -133,72 +163,46 @@
                             return;
                         }
 
-                        /**
-                         * Tokenization success
-                         *
-                         * Store token (source_id) into hidden input
-                         * This token is what backend sends to Square API.
-                         */
-                        sourceInput.value = result.token;
+                        const apiResult = await processPayment(result.token);
 
-                        // Submit form to backend for processing
-                        form.submit();
+                        console.log('[Square] Payment success', apiResult);
+                        setStatus(root, 'Payment processed successfully.');
+
+                        // Reload to refresh invoice/order state after payment
+                        window.location.reload();
 
                     } catch (err) {
-
+                        console.error('[Square] Payment form error', err);
                         setStatus(
                             root,
-                            'Payment form error: ' +
-                            (err && err.message ? err.message : 'Unknown error')
+                            'Payment failed: ' + (err && err.message ? err.message : 'Unknown error')
                         );
-
                         button.disabled = false;
                     }
                 });
 
             } catch (err) {
-                console.error('Square init failed:', err);
+                console.error('[Square] init failed', err);
                 setStatus(root, 'Square initialization failed.');
             }
         })();
     }
 
-    /**
-     * Initialize all existing payment containers on page
-     *
-     * This supports:
-     * - initial page load
-     * - static HTML renders
-     */
     function initExisting() {
         document.querySelectorAll('#square-checkout-root').forEach(initRoot);
     }
 
-    // Run initial scan
     initExisting();
 
-    /**
-     * Observe DOM changes for dynamically added payment forms
-     *
-     * This ensures compatibility with:
-     * - AJAX-loaded pages
-     * - SPA-style navigation
-     * - dynamic modal or widget rendering
-     */
     const observer = new MutationObserver(function (mutations) {
-
         for (const mutation of mutations) {
-
             for (const node of mutation.addedNodes) {
-
                 if (!(node instanceof HTMLElement)) continue;
 
-                // Direct match
                 if (node.id === 'square-checkout-root') {
                     initRoot(node);
                 }
 
-                // Nested match
                 const nested = node.querySelector && node.querySelector('#square-checkout-root');
                 if (nested) {
                     initRoot(nested);
@@ -211,5 +215,4 @@
         childList: true,
         subtree: true
     });
-
 })();
