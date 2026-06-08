@@ -1,436 +1,174 @@
-# Square Integration for FOSSBilling
+# fossbilling-square
 
-A full-featured Square integration for FOSSBilling, providing:
-
-- One-time payments
-- Subscription billing
-- Per-period setup fees
-- SKU-based product mapping
-- Square catalog export
-- Admin UI for mapping and auto-sync
-
----
-
-## Overview
-
-This project integrates Square with FOSSBilling using a hybrid architecture.
-
-The integration is split into two components which work together to provide full functionality.
-
-### Payment Adapter
-
-The payment adapter is responsible for runtime payment handling and is installed into:
-
-/library/Payment/Adapter/
-
-It handles:
-
-- Payment form rendering
-- Secure card tokenization
-- One-time payments
-- Subscription creation
-- Setup fee processing
-- Webhook handling
-
----
-
-### Admin Module (Square Manager)
-
-The admin module is installed into:
-
-/modules/Squaremanager/
-
-It provides an administrative interface for:
-
-- Exporting products to Square-compatible CSV
-- Managing SKU mappings
-- Automatically discovering Square variation IDs
-- Debugging subscription mappings
-
----
-
-Both components are required for full functionality.
+A Square payment gateway module for [FOSSBilling](https://fossbilling.org) supporting one-time payments and recurring subscriptions.
 
 ---
 
 ## Features
 
-### Payments
-
-- One-time payments using Square Web Payments SDK
-- Secure card tokenization (no card data handled directly)
-- Full webhook support for payment validation
-
----
-
-### Subscriptions
-
-Supports all standard FOSSBilling billing periods:
-
-- Weekly
-- Monthly
-- Every 3 Months
-- Every 6 Months
-- Every Year
-- Every 2 Years
-- Every 3 Years
+- **One-time payments** via Square Web Payments SDK (card tokenized in browser — no card data touches your server)
+- **Recurring subscriptions** using Square subscription plans with STATIC pricing
+- **Setup fee support** — charged once on the first invoice, excluded from recurring billing
+- **Tax-inclusive recurring pricing** — applies FOSSBilling tax rates to recurring amount
+- **Admin UI** — manage plan mappings, browse Square catalog, create static pricing variations, compare subscription statuses
+- **Bidirectional subscription sync** — cancel in FOSSBilling → Square updates; Square webhook → FOSSBilling updates
+- **Sandbox & Production** environments
 
 ---
 
-### Setup Fees
+## Requirements
 
-- Setup fees are handled as separate one-time charges
-- Only applied when greater than 0.00
-- Supports different setup fees per billing cycle
-
----
-
-### SKU-Based Mapping
-
-Each billing option generates a deterministic SKU.
-
-Example:
-
-hosting-basic-monthly
-hosting-basic-monthly-setup
-hosting-basic-3month
-hosting-basic-yearly
-
-This ensures:
-
-- Exact matching with Square catalog
-- No reliance on product name parsing
-- Clean, predictable mapping
-
----
-
-## Admin UI (Square Manager)
-
-The Square Manager interface is available in the admin panel:
-
-/admin/squaremanager
-
----
-
-### Features
-
-The admin interface provides full control over the integration:
-
-- Export products to Square-compatible CSV
-- View all product and billing combinations
-- Display generated SKUs
-- View and edit Square variation IDs
-- Auto-sync variation mappings from Square
-- Per-row "Detect" for targeted lookup
-- Highlight missing mappings
-- Search and filter results
-- Debug mode for troubleshooting
-
----
-
-### Mapping Table
-
-Each row represents:
-
-- Product
-- Billing period
-- Generated SKU
-- Square variation ID
-
-Example:
-
-hosting-basic | monthly | hosting-basic-monthly | <variation_id>
-
----
-
-### Auto Sync
-
-Auto Sync attempts to automatically map:
-
-FOSSBilling product + billing → SKU → Square variation
-
-This uses the same logic as the payment adapter, ensuring consistency between:
-
-- Admin mapping
-- Live subscription creation
+- FOSSBilling (latest)
+- Square Developer account
+- Square subscription plan with at least one **STATIC pricing** variation per billing cadence
 
 ---
 
 ## Installation
 
-⚠️ This extension installs into TWO locations.
+### 1. Copy the module
 
-Both steps are required.
+Copy the `Squaremanager/` folder into your FOSSBilling installation:
 
----
-
-### 1. Install Module
-
-Copy:
-
-module/Squaremanager/
-
-to:
-
+```
 /modules/Squaremanager/
+```
 
-Then enable the module in the admin panel.
+### 2. Enable the module
 
----
+In the admin panel: **System → Extensions → Modules** → activate **Squaremanager**.
 
-### 2. Install Payment Adapter
+The module installer automatically:
+- Creates the required database tables (`square_plan_map`, `square_customer`, `square_subscription`)
+- Deploys the payment adapter to `library/Payment/Adapter/Square.php`
+- Deploys the gateway logo to `public/assets/gateways/square.png`
 
-Copy:
+### 3. Add the payment gateway
 
-adapter/Square.php
-adapter/square-checkout.js
+**System → Payment Gateways** → add **Square** and configure:
 
-to:
+| Field | Description |
+|-------|-------------|
+| Square Access Token | From Square Developer Dashboard |
+| Application ID | From Square Developer Dashboard |
+| Location ID | Your Square location ID |
+| Environment | Sandbox or Production |
+| Webhook Signature Key | From Square Developer Dashboard (after creating webhook) |
 
-/library/Payment/Adapter/
+### 4. Set up the Square webhook
 
+In your **Square Developer Dashboard → Webhooks**, create a webhook pointing to:
 
----
+```
+https://your-domain.com/api/guest/squaremanager/handle_webhook
+```
 
-### 3. Install Gateway Logo
+Subscribe to events: `subscription.updated`, `subscription.created`
 
-Copy:
+Copy the **Signature Key** back into the gateway config field.
 
-module/Squaremanager/installer_files/public/assets/gateways/square.png
-
-to:
-
-/public/assets/gateways/square.png
-
----
-
-### 4. Configure Gateway
-
-In the admin panel:
-
-System → Payments → Square
-
-Configure:
-
-- Application ID
-- Access Token
-- Location ID
-- Webhook Signature Key
+> The exact webhook URL is shown in the **Squaremanager admin page** with a one-click copy button.
 
 ---
 
-### 5. Enable Gateway
+## Subscription Setup
 
-After configuration:
+Square's Dashboard forces RELATIVE pricing when catalog items are linked to a plan, which cannot be overridden programmatically. This module requires **STATIC pricing** variations.
 
-- Enable the Square payment gateway
-- It will then be available during checkout
+### Creating static pricing variations
 
----
+In the Squaremanager admin (**System → Extensions → Settings → Squaremanager**):
 
-## Export to Square
+1. Click **＋ Create Static Variation**
+2. Select the Square subscription plan
+3. Select the FOSSBilling product
+4. Choose the cadence and confirm the price
+5. Optionally auto-map the variation to the product/period
 
-The export tool generates a CSV compatible with Square catalog import.
+### Mapping plans to products
 
-Access:
+After creating static variations, add a mapping under **Product → Square Plan Mappings**:
 
-/admin/squaremanager → Export Products
-
----
-
-### Export Includes
-
-- All products
-- All billing periods
-- Setup fee variations (if defined)
-- Correct SKU format
+- Select the FOSSBilling product
+- Select the billing period
+- Enter the Square variation ID (browse with **Browse Square Plans**)
+- Set the environment (sandbox/production)
 
 ---
 
-### SKU Format
+## Admin UI
 
-product-slug-billing
-product-slug-billing-setup
+Access via **System → Extensions → Settings → Squaremanager**
 
-Example:
+### Sections
 
-hosting-basic-monthly
-hosting-basic-monthly-setup
+**Product → Square Plan Mappings**
+- Add, edit, delete mappings
+- Browse live Square catalog to find variation IDs
+- Export/import mappings as JSON
 
+**Subscriptions**
+- Side-by-side comparison of Square status vs FOSSBilling status
+- Mismatch highlighting
+- Per-row: Sync from Square, Cancel in Square, Delete local record
+- Sync All — pulls current status from Square for all active subscriptions
 
-This ensures direct matching with Square catalog items.
+**Reference URLs**
+- Webhook URL with one-click copy
+- IPN Callback URL with one-click copy
 
----
-
-## Mapping System
-
-The integration uses a deterministic mapping system to connect FOSSBilling products with Square subscription plan variations.
-
----
-
-### Mapping Table
-
-Mappings are stored in the database table:
-
-
-square_product_plan_map
-
-
-Each record contains:
-
-- product_id
-- billing_key
-- square_sku
-- square_plan_variation_id
+**Diagnostics**
+- Configuration validation
+- Live API ping
+- Table row counts
 
 ---
 
-### How Mapping Works
+## How Payments Work
 
-1. A SKU is generated:
+### One-time payments
+1. `getHtml()` renders the Square Web Payments SDK card form
+2. Customer enters card details — Square returns a secure token
+3. Token is submitted to `Api/Guest.php` → `processTransaction()`
+4. Adapter charges the card via Square Payments API
+5. Invoice is marked paid in FOSSBilling
 
-product_slug + billing_key
-
-2. The system attempts to locate a matching Square item variation:
-- Exact SKU match is required
-
-3. The corresponding Square subscription plan variation is resolved
-
-4. The result is stored locally for future use
-
----
-
-### Example
-
-Product: hosting-basic
-Billing: monthly
-Generated SKU:
-hosting-basic-monthly
-
-
-This SKU is used to locate the corresponding Square catalog entry.
+### Subscription payments
+1. Same tokenization flow as above
+2. Square customer and card-on-file are created/reused
+3. Square subscription is created (start date = +1 billing period to avoid double-charging)
+4. Initial invoice amount is charged immediately (includes setup fee if applicable)
+5. Recurring amount = product's recurring price + tax (setup fee excluded)
+6. Records written to `square_subscription` and FOSSBilling's native `subscription` table
 
 ---
 
-### Why This Design
+## Supported Billing Periods
 
-This approach avoids:
-
-- Product name mismatches
-- Manual mapping complexity
-- Inconsistent subscription linking
-
-And ensures:
-
-- Reliable automation
-- Scalable product handling
-- Exact matching with Square catalog
-
----
-
-## Design Decisions
+| FOSSBilling | Square Cadence |
+|-------------|---------------|
+| 1D | DAILY |
+| 1W | WEEKLY |
+| 2W | EVERY_TWO_WEEKS |
+| 1M | MONTHLY |
+| 2M | EVERY_TWO_MONTHS |
+| 3M | QUARTERLY |
+| 4M | EVERY_FOUR_MONTHS |
+| 6M | EVERY_SIX_MONTHS |
+| 1Y | ANNUAL |
+| 2Y | EVERY_TWO_YEARS |
 
 ---
 
-### Deterministic SKU Strategy
+## Database Tables
 
-FOSSBilling does not provide detailed billing structure to external systems.
+| Table | Purpose |
+|-------|---------|
+| `square_plan_map` | Maps FOSSBilling product + billing period → Square variation ID |
+| `square_customer` | Links FOSSBilling client ID → Square customer ID |
+| `square_subscription` | Tracks active/historical subscriptions |
 
-To compensate, this integration derives a consistent identifier:
-
-slug + billing_key
-
-This allows:
-
-- Exact SKU matching
-- Cross-system compatibility
-- Predictable behavior
-
----
-
-### Setup Fee Handling
-
-Square subscriptions do not support embedded setup fees.
-
-Solution:
-
-1. Charge setup fee as one-time payment
-2. Create subscription separately
-
-This ensures:
-
-- Accurate billing
-- Compatibility with Square API
-- Transparent transaction flow
-
----
-
-### Local Mapping Cache
-
-Mappings are stored locally to:
-
-- Avoid repeated catalog scans
-- Improve performance
-- Allow manual overrides
-
-Admin users can:
-
-- Edit mappings directly
-- Re-sync automatically at any time
-
----
-
-## Workflow
-
-Recommended setup process:
-
-1. Create products in FOSSBilling
-2. Set product slugs
-3. Export products using Square Manager
-4. Import products into Square
-5. Create subscription plans in Square
-6. Run Auto Sync in Square Manager
-7. Verify mappings
-8. Begin accepting payments
-
----
-
-## Developer Notes
-
----
-
-### Billing Keys
-
-weekly
-monthly
-3month
-6month
-yearly
-2year
-3year
-
----
-
-### FOSSBilling Period Mapping
-
-| Billing Key | Period |
-|------------|--------|
-| weekly     | 1W |
-| monthly    | 1M |
-| 3month     | 3M |
-| 6month     | 6M |
-| yearly     | 1Y |
-| 2year      | 2Y |
-| 3year      | 3Y |
-
----
-
-## Limitations
-
-- Square subscription plan variations must already exist
-- RELATIVE pricing plans may require additional handling
-- Product slugs must be defined in FOSSBilling
-- Setup fees are processed as separate transactions
+FOSSBilling's native `subscription` table is also written to on subscription creation so subscriptions appear in the standard client/admin subscription views.
 
 ---
 
@@ -440,15 +178,7 @@ Apache 2.0
 
 ---
 
-## Contribution
-
-Contributions are welcome.
-
-Please open issues or submit pull requests on GitHub.
-
----
-
 ## Author
 
-Louis Gutenschwager  
+Louis Gutenschwager
 https://github.com/lcslouis
