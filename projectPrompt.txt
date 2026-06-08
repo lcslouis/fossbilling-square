@@ -1,0 +1,5008 @@
+Project Goal:
+
+Rebuild a Square Payment Gateway Adapter for FOSSBilling from scratch using a clean, stable, and maintainable architecture.
+
+The adapter must:
+- Fully support one-time invoice payments
+- Fully support recurring subscriptions using Square
+- Integrate with FOSSBilling’s invoice system without modifying core templates
+- Avoid fragile dependencies on banklink routes or default checkout form submission
+- Use Square Web Payments SDK for secure card tokenization
+- Use backend API processing for payment execution
+
+The system must be separated into clear layers:
+1. Payment Adapter (core payment logic)
+2. Frontend Checkout UI (Square integration)
+3. Extension Module (subscription management and admin tools)
+
+Key constraints:
+- No reliance on banklink POST submissions
+- No nested or conflicting forms inside FOSSBilling checkout
+- No dependency on PayPal-style redirect logic
+- Must be compatible with FOSSBilling’s API and transaction lifecycle
+
+Primary design approach:
+- Treat Square as a direct API-based gateway (NOT redirect-based)
+- Tokenize card data in browser
+- Send secure token to backend
+- Process payment immediately via adapter
+
+The adapter must remain self-contained and usable independently of the extension module.
+Architecture Contract:
+
+The Square payment adapter must follow a strict and minimal contract aligned with FOSSBilling’s payment system.
+
+The adapter must be implemented as an API-style payment gateway, not a redirect-style gateway.
+
+Core Responsibilities:
+
+1. getHtml()
+   - Render the payment UI only
+   - Output minimal HTML required for Square card entry
+   - Inject configuration into the frontend via a JavaScript-safe object
+   - Load Square Web Payments SDK
+   - MUST NOT:
+       - Submit forms
+       - Redirect to banklink
+       - Trigger checkout submission
+       - Throw exceptions that break page rendering
+
+2. Frontend Checkout Logic (JS)
+   - Initialize Square SDK
+   - Render card input fields
+   - Handle user interaction (Pay button click)
+   - Tokenize card data securely
+   - Send payment token to backend via HTTP request (AJAX/fetch)
+   - MUST:
+       - Prevent default page submission behavior
+       - Never rely on FOSSBilling checkout form submission
+       - Never post to /invoice/banklink/
+
+3. processTransaction()
+   - Accept a secure payment token from frontend
+   - Validate required fields (invoice_id, gateway_id, token)
+   - Call Square API to process payment
+   - Update FOSSBilling:
+       - Record transaction
+       - Mark invoice paid
+       - Handle subscription setup if applicable
+
+4. Separation of Concerns
+   - Adapter handles payments only
+   - Extension module handles:
+       - Plan/product mapping
+       - Subscription configuration
+       - Admin UI
+       - Data export/import
+   - Frontend JS handles only tokenization + request dispatch
+
+5. Error Handling Rules
+   - getHtml() must NEVER throw fatal exceptions
+   - All runtime errors should be handled:
+       - safely in JS (user feedback)
+       - safely in backend (return structured errors)
+   - No errors should break Twig rendering or invoice views
+
+6. Data Flow
+
+   Browser:
+       User clicks "Pay"
+       → Tokenize card via Square SDK
+       → Send token to backend API
+
+   Backend:
+       → Receive token
+       → Process payment via Square API
+       → Update invoice/transaction state
+       → Return success or failure
+
+7. Strict Prohibitions
+   The implementation must NOT:
+   - Use FOSSBilling banklink POST flow
+   - Use nested or injected forms
+   - Submit to current page URL
+   - Copy PayPal adapter behavior
+   - Depend on checkout DOM structure outside its own container
+   
+Project File Structure:
+
+The Square payment system must be organized into clearly separated components.
+
+All files must have single responsibilities and no cross-layer coupling.
+
+--------------------------------------------------
+
+1. Gateway Adapter (Core Payment Engine)
+
+Location:
+  library/Payment/Adapter/Square.php
+
+Responsibilities:
+  - Define gateway configuration (getConfig)
+  - Render payment UI (getHtml)
+  - Accept and process transactions (processTransaction)
+  - Communicate with Square API
+  - Handle subscription creation logic
+  - Remain self-contained and functional without extension
+
+Must NOT:
+  - Render complex frontend logic beyond minimal UI
+  - Depend on external JS files unless inline
+  - Depend on FOSSBilling checkout form behavior
+  - Throw exceptions that break Twig rendering
+
+--------------------------------------------------
+
+2. Embedded Checkout Script (Inline JS)
+
+Location:
+  Inside Square.php (embedded using helper method)
+
+Responsibilities:
+  - Initialize Square Web Payments SDK
+  - Attach card UI to a container
+  - Handle "Pay" button click
+  - Tokenize card securely
+  - Send token to backend API via fetch()
+
+Must:
+  - Be fully inline (no external file required)
+  - Use window.squareConfig as input
+  - Prevent default submission behavior
+
+Must NOT:
+  - Submit forms
+  - Redirect page manually
+  - Interact with DOM outside its container
+
+--------------------------------------------------
+
+3. Extension Module (Squaremanager)
+
+Location:
+  module/Squaremanager/
+
+Responsibilities:
+  - Admin UI
+  - Plan mapping (Square plans <-> FOSSBilling products)
+  - Subscription configuration
+  - Installer (deploy Square adapter file if needed)
+  - Data export/import
+
+Must NOT:
+  - Handle payment execution
+  - Control checkout UI
+  - Override adapter behavior at runtime
+
+--------------------------------------------------
+
+4. Supporting Backend Services (Optional)
+
+Location:
+  module/Squaremanager/Service.php
+
+Responsibilities:
+  - Handle subscription helper logic
+  - Store mapping data
+  - Provide utilities for adapter if needed
+
+Must NOT:
+  - Execute payment transactions directly
+
+--------------------------------------------------
+
+5. Data Flow Overview
+
+Frontend:
+  User clicks "Pay"
+  → JS tokenizes card via Square SDK
+  → Sends token to backend API endpoint
+
+Backend:
+  API receives token
+  → Calls adapter processTransaction()
+  → Adapter calls Square API
+  → Adapter updates invoice + transaction
+  → Response returned to frontend
+
+--------------------------------------------------
+
+6. Configuration Delivery
+
+squareConfig object MUST include:
+  - applicationId
+  - locationId
+  - invoiceId
+  - gatewayId
+  - processUrl
+  - environment
+  - subscription flag
+
+This object must be injected via getHtml() using inline script.
+
+--------------------------------------------------
+
+7. Stability Requirements
+
+The system MUST:
+  - Never break invoice pages if Square fails
+  - Never throw unhandled exceptions in getHtml()
+  - Never modify FOSSBilling core templates
+  - Be safe to enable/disable without affecting other gateways
+
+Implementation Specification — getHtml() Rendering
+
+The getHtml() method must ONLY handle rendering of the payment UI and configuration delivery.
+
+It must follow these strict requirements:
+
+--------------------------------------------------
+
+1. Input Handling
+
+The method receives:
+  - $invoice_id
+  - $subscription flag
+
+It must:
+  - Safely load the invoice using the database layer
+  - Convert the invoice to an array if needed
+  - NEVER assume fields exist (use safe defaults)
+
+Required extracted values:
+  - invoiceId (integer)
+  - amount (formatted string, "0.00" format)
+  - currency (uppercase string, default "USD")
+
+No field access may cause PHP warnings or exceptions.
+
+--------------------------------------------------
+
+2. Gateway Identification
+
+The method must:
+  - Retrieve gateway_id from pay_gateway table
+  - Use safe fallback if not found (set to 0, log warning)
+
+It must NEVER:
+  - throw fatal exceptions
+  - break rendering if gateway is misconfigured
+
+--------------------------------------------------
+
+3. Configuration Object
+
+A JavaScript-safe configuration object (squareConfig) must be created.
+
+Required fields:
+  - applicationId
+  - locationId
+  - invoiceId
+  - gatewayId
+  - processUrl
+  - amount
+  - currency
+  - environment
+  - isSubscription
+
+All values must be:
+  - explicitly cast to correct type
+  - never null (use safe defaults)
+
+--------------------------------------------------
+
+4. HTML Output Structure
+
+The method must render ONLY:
+
+<div id="square-checkout-root">
+  <div id="square-card-container"></div>
+  <button id="square-pay-button">Pay</button>
+  <div id="square-payment-status"></div>
+</div>
+
+Rules:
+  - No <form> elements
+  - No nested forms
+  - No hidden inputs
+  - No dependency on existing checkout form
+  - No inline PHP variables inside HTML attributes unless escaped
+
+--------------------------------------------------
+
+5. Script Injection
+
+The method must inject:
+
+A. squareConfig:
+<script>
+  window.squareConfig = {...};
+</script>
+
+B. Square SDK:
+<script src="https://web.squarecdn.com/v1/square.js"></script>
+OR sandbox version
+
+C. Inline checkout JS:
+<script>
+  // tokenization + API logic
+</script>
+
+--------------------------------------------------
+
+6. Output Safety Rules
+
+getHtml() MUST:
+  - NEVER throw exceptions
+  - NEVER return null
+  - ALWAYS return valid HTML string
+  - NEVER modify global state
+  - NEVER interfere with Twig rendering
+
+--------------------------------------------------
+
+7. Strict Prohibitions
+
+The method must NOT:
+  - Submit forms
+  - Redirect pages
+  - Call processTransaction()
+  - Access $_POST or $_GET
+  - Trigger payment processing
+  - Depend on external JS files (must be inline)
+
+--------------------------------------------------
+
+8. Final Responsibility
+
+getHtml() is strictly:
+
+→ "Render UI + Provide Config"
+
+NOT:
+
+→ "Control Payment Execution"
+
+Implementation Specification — Frontend Checkout Logic (JavaScript)
+
+The frontend script is responsible for handling user interaction, card tokenization, and communication with the backend.
+
+It must operate completely independently from FOSSBilling’s default checkout behavior.
+
+--------------------------------------------------
+
+1. Initialization
+
+When the page loads:
+
+  - Locate #square-checkout-root
+  - Read configuration from window.squareConfig
+  - Validate required fields:
+      - applicationId
+      - locationId
+      - invoiceId
+      - gatewayId
+      - processUrl
+
+If any required field is missing:
+  → Log error in console
+  → Display user-friendly message in UI
+  → DO NOT proceed further
+
+--------------------------------------------------
+
+2. Square SDK Setup
+
+The script must:
+
+  - Initialize Square using:
+        Square.payments(applicationId, locationId)
+
+  - Create card instance:
+        payments.card()
+
+  - Attach card to:
+        #square-card-container
+
+If initialization fails:
+  → Display "Payment system unavailable"
+  → Disable payment button
+
+--------------------------------------------------
+
+3. Pay Button Behavior
+
+On click of #square-pay-button:
+
+  - MUST call:
+        event.preventDefault()
+        event.stopPropagation()
+
+  - MUST disable button to prevent double payments
+
+  - MUST NOT:
+        - submit any form
+        - trigger page navigation
+        - interact with external DOM elements
+
+--------------------------------------------------
+
+4. Tokenization Flow
+
+On click:
+
+  → Call:
+        card.tokenize()
+
+If result.status !== "OK":
+
+  - Extract error messages
+  - Display errors in #square-payment-status
+  - Re-enable button
+  - STOP execution
+
+If successful:
+
+  - Extract:
+        result.token
+
+--------------------------------------------------
+
+5. API Request
+
+Send token to backend using fetch:
+
+  Method:
+        POST
+
+  URL:
+        window.squareConfig.processUrl
+
+  Body:
+        {
+            invoice_id: <invoiceId>,
+            gateway_id: <gatewayId>,
+            source_token: <token>
+        }
+
+  Headers:
+        Content-Type: application/json
+
+  MUST:
+        - include credentials: same-origin
+        - handle non-JSON responses safely
+
+--------------------------------------------------
+
+6. Response Handling
+
+On response:
+
+  IF success:
+      - Show "Payment successful"
+      - Reload page to update invoice state
+
+  IF error:
+      - Extract error message safely
+      - Display error in UI
+      - Re-enable button
+
+  MUST:
+      - NOT throw unhandled JS errors
+      - NOT break UI
+      - ALWAYS give user feedback
+
+--------------------------------------------------
+
+7. Error Handling Rules
+
+The script must:
+
+  - Catch ALL async errors
+  - Log detailed errors to console
+  - Show simplified messages to user
+
+Example:
+
+  console.error(...)
+  user sees:
+      "Payment failed. Please try again."
+
+--------------------------------------------------
+
+8. DOM Scope Rules
+
+The script must ONLY interact with:
+
+  - #square-checkout-root
+  - Its child elements
+
+It must NOT:
+
+  - Modify FOSSBilling checkout form
+  - Query global form elements
+  - Override site-wide JS behavior
+
+--------------------------------------------------
+
+9. Strict Prohibitions
+
+The script must NOT:
+
+  - Call form.submit()
+  - Redirect browser manually
+  - Post to /invoice/banklink/
+  - Use jQuery-specific APIs
+  - Depend on bb.post or FOSSBilling internal JS helpers
+
+--------------------------------------------------
+
+10. Final Responsibility
+
+The frontend is strictly:
+
+  → "Tokenize card + send request"
+
+NOT:
+
+  → "Process payment"
+  → "Control invoice state"
+
+Implementation Specification — processTransaction()
+
+The processTransaction() method is the ONLY place where actual payment processing occurs.
+
+It must safely receive a token, call Square API, and update the invoice + transaction state.
+
+--------------------------------------------------
+
+1. Method Responsibility
+
+This method must:
+
+  - Receive payment request from frontend/API
+  - Validate incoming data
+  - Execute Square payment
+  - Record transaction
+  - Mark invoice as paid
+  - Handle subscription creation (if enabled)
+
+It must NOT:
+
+  - Render output
+  - Echo/print anything
+  - Break application flow
+
+--------------------------------------------------
+
+2. Expected Inputs
+
+The method receives:
+
+  - $id (transaction ID)
+  - $data (request payload)
+  - $gateway_id
+
+From $data, extract:
+
+  - invoice_id
+  - source_token (Square token)
+
+Validation rules:
+
+  - invoice_id must exist and be a valid integer
+  - source_token must be a non-empty string
+  - gateway_id must match current gateway
+
+If any value is invalid:
+  → throw controlled exception (NOT fatal crash)
+
+--------------------------------------------------
+
+3. Load Required Models
+
+The method must load:
+
+  - Transaction model (using $id)
+  - Invoice model (using invoice_id)
+  - Gateway configuration
+  - Client information (via invoice)
+
+If anything fails:
+  → throw safe exception
+
+--------------------------------------------------
+
+4. Prepare Square Payment Request
+
+Construct payment request using:
+
+  - source_token
+  - amount (converted to smallest currency unit, e.g. cents)
+  - currency
+  - idempotency_key (unique per transaction)
+
+Example:
+
+  amount_money:
+      amount = invoice amount * 100
+      currency = invoice currency
+
+Important:
+  - Amount must match invoice total exactly
+  - Never trust frontend amount
+
+--------------------------------------------------
+
+5. Call Square API
+
+Use Square SDK or HTTP client:
+
+  - Endpoint: create payment
+  - Pass token and amount
+
+Handle response carefully:
+
+  IF success:
+      → proceed to update system
+
+  IF failure:
+      → extract error message
+      → throw controlled exception
+
+--------------------------------------------------
+
+6. Transaction Recording
+
+Update FOSSBilling transaction:
+
+  - txn_id → Square payment ID
+  - txn_status → "completed" or equivalent
+  - amount → invoice total
+  - currency → invoice currency
+  - status → PROCESSED
+  - updated_at → current timestamp
+
+Must:
+  - store result in DB
+  - ensure consistency
+
+--------------------------------------------------
+
+7. Mark Invoice as Paid
+
+Use invoice service:
+
+  - approve invoice if not approved
+  - apply payment using credits system
+
+Example logic:
+
+  IF invoice is not approved:
+      → approve it
+
+  THEN:
+      → mark as paid
+
+--------------------------------------------------
+
+8. Subscription Handling (if applicable)
+
+If subscription flag is active:
+
+  - Create subscription record in FOSSBilling
+  - Store:
+        - Square subscription ID
+        - billing period
+        - amount
+        - currency
+
+  - Link subscription to invoice
+
+This step may call helper methods or extension services.
+
+--------------------------------------------------
+
+9. Error Handling
+
+All errors must:
+
+  - be caught at appropriate level
+  - produce controlled exceptions
+  - NOT corrupt transaction data
+  - NOT leave invoice in inconsistent state
+
+Example rule:
+
+  IF Square payment fails:
+      → DO NOT mark invoice as paid
+      → return failure response
+
+--------------------------------------------------
+
+10. Idempotency Protection
+
+The system must:
+
+  - Avoid duplicate charges
+  - Use unique idempotency_key for each transaction attempt
+
+If duplicate detected:
+  → safely ignore duplicate processing
+
+--------------------------------------------------
+
+11. Return Behavior
+
+The method should:
+
+  - Return success status OR
+  - Throw controlled exception
+
+It must NOT:
+
+  - redirect user
+  - generate HTML
+  - manipulate frontend
+
+--------------------------------------------------
+
+12. Security Requirements
+
+The method MUST:
+
+  - NEVER accept raw card data
+  - ONLY accept tokenized input
+  - NEVER log sensitive payment details
+  - Validate all inputs before use
+
+--------------------------------------------------
+
+13. Strict Prohibitions
+
+The method must NOT:
+
+  - use banklink routes
+  - rely on GET/POST globals directly
+  - assume valid frontend behavior
+  - trust any client-supplied values except token
+
+--------------------------------------------------
+
+14. Final Responsibility
+
+processTransaction() is strictly:
+
+  → "Execute payment + update system state"
+
+NOT:
+
+  → "Render UI"
+  → "Handle checkout flow"
+  → "Control frontend"  
+  
+
+Implementation Specification — API Integration Layer
+
+The API integration layer defines how the frontend securely hands off a tokenized payment request to the backend so that processTransaction() can execute cleanly inside FOSSBilling.
+
+--------------------------------------------------
+
+1. Purpose
+
+This layer exists to connect:
+
+  Frontend:
+      tokenized Square payment request
+
+  Backend:
+      adapter processTransaction()
+
+It must provide a safe, minimal, and explicit handoff.
+
+--------------------------------------------------
+
+2. Required Behavior
+
+The frontend must send a single payment request containing ONLY:
+
+  - invoice_id
+  - gateway_id
+  - source_token
+
+These values must be sent to a backend endpoint that is explicitly designed to initiate payment processing.
+
+The request must:
+  - be POST
+  - use JSON payload
+  - include same-origin credentials
+  - expect JSON response
+
+--------------------------------------------------
+
+3. Endpoint Contract
+
+The API endpoint used by the adapter must support:
+
+  Request payload:
+      {
+          invoice_id: integer,
+          gateway_id: integer,
+          source_token: string
+      }
+
+  Response payload:
+      success:
+          {
+              success: true,
+              transaction_id: ...,
+              status: ...
+          }
+
+      failure:
+          {
+              success: false,
+              error: ...
+          }
+
+The adapter/frontend contract must not assume any undocumented response shape.
+It must safely handle unexpected or malformed responses.
+
+--------------------------------------------------
+
+4. Gateway Routing Requirement
+
+The endpoint must route the request to the correct payment gateway using:
+
+  gateway_id
+
+The request must never rely on:
+  - gateway title
+  - gateway name string
+  - inferred gateway type
+
+Only the actual gateway ID should be used for routing.
+
+--------------------------------------------------
+
+5. Transaction Triggering
+
+The endpoint must result in the backend eventually invoking:
+
+  processTransaction()
+
+The frontend must not directly attempt to:
+  - mark invoices paid
+  - update transactions
+  - create subscriptions
+
+Only the backend performs those operations.
+
+--------------------------------------------------
+
+6. Security Rules
+
+The API request must:
+
+  - NEVER include raw card data
+  - ONLY include Square token
+  - validate invoice ownership / access rules
+  - reject incomplete payloads
+  - reject invalid gateway IDs
+  - reject missing tokens
+
+The API response must not expose:
+  - secrets
+  - internal stack traces
+  - raw Square credentials
+
+--------------------------------------------------
+
+7. Failure Handling
+
+If the endpoint fails:
+
+  Frontend must:
+      - show user-friendly payment failure message
+      - re-enable the Pay button
+      - keep user on current page
+
+  Backend must:
+      - return structured error
+      - not mark invoice paid
+      - not partially create subscriptions
+      - not corrupt transaction records
+
+--------------------------------------------------
+
+8. Non-UI Rule
+
+The API endpoint must behave as a pure backend process.
+
+It must NOT:
+  - return HTML
+  - redirect browser
+  - depend on banklink page rendering
+  - require checkout form submission
+
+--------------------------------------------------
+
+9. Stability Requirement
+
+If the endpoint is unavailable or misconfigured:
+
+  - payment UI must still render
+  - user must receive a clear failure message
+  - invoice page must not crash
+
+The API integration layer must fail safely.
+
+--------------------------------------------------
+
+10. Strict Prohibitions
+
+This layer must NOT:
+
+  - use /invoice/banklink/ as a processing endpoint
+  - rely on redirect-based payment flow
+  - use nested forms
+  - depend on default checkout submit handlers
+  - assume a PayPal-style external postback lifecycle
+
+--------------------------------------------------
+
+11. Final Responsibility
+
+The API integration layer is strictly:
+
+  → "Deliver tokenized payment request to backend"
+
+NOT:
+
+  → "Execute payment in browser"
+  → "Replace transaction logic"
+  → "Control invoice rendering"
+ 
+
+Implementation Specification — Subscription Creation & Recurring Billing Rules
+
+This section defines when and why subscription logic should run inside the rebuilt Square payment adapter.
+
+--------------------------------------------------
+
+1. Purpose
+
+Subscription logic exists to allow the Square payment adapter to support recurring billing in FOSSBilling.
+
+It must handle:
+
+  - identifying recurring invoices
+  - creating Square subscriptions when required
+  - storing subscription linkage back into FOSSBilling
+
+It must NOT interfere with one-time invoice payments.
+
+--------------------------------------------------
+
+2. Trigger Condition
+
+Subscription logic must run ONLY when the current payment represents a recurring billing scenario.
+
+The adapter must clearly determine:
+
+  - whether the current invoice is subscription-related
+  - whether the payment is intended to start a recurring billing agreement
+  - whether a one-time charge should be processed instead
+
+If those conditions are not met:
+  → the adapter must follow one-time payment logic only
+
+--------------------------------------------------
+
+3. Separation from One-Time Payments
+
+The system must maintain two clean paths:
+
+  Path A:
+      One-time payment processing
+
+  Path B:
+      Subscription setup and recurring billing processing
+
+These paths must be explicitly separated in code.
+
+The adapter must NOT:
+  - guess
+  - mix the flows together
+  - create subscriptions during one-time invoice payment processing by accident
+
+--------------------------------------------------
+
+4. Subscription Detection Rule
+
+The adapter must use a reliable internal method to determine if the invoice represents a recurring service.
+
+This detection must be based on normalized invoice/order/subscription data and not on fragile UI assumptions.
+
+The detection logic must be:
+
+  - explicit
+  - reusable
+  - testable
+  - isolated in a helper method
+
+--------------------------------------------------
+
+5. First Payment Rule
+
+The first successful subscription-related payment must result in:
+
+  - a valid Square customer
+  - a stored reusable card/payment source if required
+  - creation of a recurring subscription in Square
+  - linkage back to FOSSBilling
+
+This first payment flow must not rely on future callbacks to create the subscription.
+
+--------------------------------------------------
+
+6. Renewal Rule
+
+Renewal invoices must not behave like brand-new subscriptions unless necessary.
+
+The system must distinguish between:
+
+  - initial subscription creation
+  - recurring renewal collection
+  - failed subscription retry cases
+
+--------------------------------------------------
+
+7. Stability Rule
+
+Subscription logic must fail safely.
+
+If subscription creation fails:
+
+  - invoice must NOT be falsely marked as fully paid
+  - transaction state must remain consistent
+  - user must receive a clear failure response
+
+--------------------------------------------------
+
+8. Strict Prohibitions
+
+Subscription logic must NOT:
+
+  - run for every invoice by default
+  - depend on frontend assumptions
+  - depend on PayPal-style recurring flow
+  - depend on banklink redirects
+  - create duplicate subscriptions
+
+--------------------------------------------------
+
+9. Final Responsibility
+
+This layer is strictly:
+
+  → "Decide whether recurring billing must be created"
+
+NOT:
+
+  → "Render checkout UI"
+  → "Own payment tokenization"
+  → "Replace transaction processing"
+ 
+
+Implementation Specification — Subscription Data Model & Required Stored Fields
+
+This section defines what subscription-related data must exist, what must be stored, and how the adapter/extension should treat recurring billing records.
+
+--------------------------------------------------
+
+1. Purpose
+
+The subscription data model exists to give the Square adapter and the Square extension a stable internal structure for recurring billing.
+
+It must support:
+
+  - identifying recurring services
+  - mapping Square subscriptions to FOSSBilling records
+  - storing billing metadata safely
+  - supporting renewals, cancellations, and status updates
+
+--------------------------------------------------
+
+2. Core Subscription Record Requirements
+
+The system must be able to store or derive the following fields for each recurring billing relationship:
+
+  - client_id
+  - invoice_id (initial invoice or linked invoice)
+  - gateway_id
+  - currency
+  - amount
+  - billing period
+  - recurring interval/cycle
+  - status
+  - external subscription identifier (Square subscription ID)
+  - external customer identifier (Square customer ID)
+  - external payment source/card identifier if applicable
+
+These values must be treated as authoritative linkage data between FOSSBilling and Square.
+
+--------------------------------------------------
+
+3. Required Internal Meanings
+
+Each field must have a clear meaning:
+
+  client_id
+      The FOSSBilling client who owns the recurring billing relationship
+
+  invoice_id
+      The invoice associated with the initial subscription creation or current linked billing action
+
+  gateway_id
+      The FOSSBilling payment gateway record used for this subscription
+
+  currency
+      The billing currency used for the subscription
+
+  amount
+      The recurring charge amount expected for each cycle
+
+  billing period / interval
+      The recurring cadence used for billing
+      Example concepts:
+          weekly
+          monthly
+          quarterly
+          yearly
+
+  status
+      The current subscription state
+      Example concepts:
+          active
+          pending
+          canceled
+          failed
+
+  Square subscription ID
+      The external recurring billing identifier created in Square
+
+  Square customer ID
+      The external customer record tied to the billing agreement
+
+  card/payment source ID
+      The reusable stored payment source associated with the recurring billing setup
+
+--------------------------------------------------
+
+4. Mapping Requirement
+
+The data model must support a mapping between:
+
+  FOSSBilling recurring product/billing definition
+      ↔
+  Square recurring billing entity
+
+This mapping must be explicit and persistent.
+
+It must NOT rely on:
+  - fragile display labels
+  - guessed plan names
+  - assumptions from frontend UI
+
+--------------------------------------------------
+
+5. Product/Plan Association Requirement
+
+For subscription setup, the system must support storage or lookup of:
+
+  - FOSSBilling product identifier
+  - selected billing interval
+  - matching Square recurring plan/variation identifier
+
+This association must be stable enough to:
+  - create subscriptions correctly
+  - prevent duplicate or wrong plan selection
+  - allow admin management through the extension
+
+--------------------------------------------------
+
+6. Initial Payment Linkage Rule
+
+When a subscription is first created, the data model must link together:
+
+  - client
+  - invoice
+  - transaction
+  - Square customer
+  - Square payment source
+  - Square subscription ID
+
+The system must be able to reconstruct the recurring billing relationship from persisted records.
+
+--------------------------------------------------
+
+7. Renewal Compatibility Requirement
+
+The data model must support later processing of:
+
+  - renewals
+  - retries
+  - cancellations
+  - status synchronization
+
+This means recurring records must not only store “creation-time” values.
+They must also persist enough identifiers to manage the subscription over time.
+
+--------------------------------------------------
+
+8. Persistence Rule
+
+If the extension introduces its own tables or metadata storage, those records must be used only for:
+
+  - mapping
+  - administrative support
+  - subscription helper data
+
+The core payment adapter must remain able to function even if optional admin metadata is limited, provided the critical subscription identifiers exist.
+
+--------------------------------------------------
+
+9. Validation Requirements
+
+Before using subscription data, the system must validate:
+
+  - client_id exists
+  - invoice_id exists
+  - gateway_id is valid
+  - amount is numeric and positive
+  - currency is valid
+  - external Square IDs are non-empty when required
+
+If required fields are missing:
+  → subscription creation/update must fail safely
+
+--------------------------------------------------
+
+10. Strict Prohibitions
+
+The subscription data model must NOT:
+
+  - depend on frontend state
+  - depend on hardcoded plan assumptions
+  - overwrite unrelated invoice data
+  - assume every recurring invoice is an initial signup
+  - treat one-time invoices as recurring records
+
+--------------------------------------------------
+
+11. Final Responsibility
+
+This layer is strictly:
+
+  → "Define what recurring billing data must exist and persist"
+
+NOT:
+
+  → "Create subscriptions in frontend"
+  → "Render checkout UI"
+  → "Execute payment tokenization"
+
+
+Implementation Specification — Subscription Creation Flow & Lifecycle Rules
+
+This section defines how recurring billing must be created, linked, maintained, and transitioned over time inside the rebuilt Square payment adapter.
+
+--------------------------------------------------
+
+1. Purpose
+
+The subscription creation flow exists to define the exact lifecycle of a recurring billing relationship from:
+
+  initial signup
+      →
+  active recurring billing
+      →
+  renewal / retry / cancellation / failure
+
+The system must treat subscription lifecycle as a backend-controlled process.
+
+--------------------------------------------------
+
+2. Initial Subscription Creation Flow
+
+When a subscription-related payment is being processed for the first time, the backend must execute these steps in order:
+
+  1. validate recurring billing intent
+  2. load invoice and client
+  3. identify selected recurring plan/mapping
+  4. ensure Square customer exists
+  5. create or store reusable payment source if required
+  6. create Square subscription
+  7. store resulting Square subscription identifiers
+  8. update FOSSBilling subscription record
+  9. finalize transaction/invoice state
+
+Each step must succeed before the next one is considered valid.
+
+--------------------------------------------------
+
+3. Preconditions Before Subscription Creation
+
+Before a Square subscription can be created, the backend must confirm:
+
+  - invoice is valid
+  - client is valid
+  - recurring billing is intended
+  - mapped recurring plan exists
+  - gateway is configured
+  - tokenized payment source is valid
+  - required billing metadata exists
+
+If any precondition fails:
+  → subscription creation must stop safely
+  → invoice must remain unpaid unless explicitly supported by design
+  → no partial recurring state should be recorded as active
+
+--------------------------------------------------
+
+4. Customer Creation Rule
+
+The lifecycle must include a stable Square customer record.
+
+If Square customer does not already exist:
+  → create one
+
+If it already exists:
+  → reuse it
+
+The adapter must not create duplicate customer records unnecessarily.
+
+--------------------------------------------------
+
+5. Payment Source / Card Storage Rule
+
+If Square recurring billing requires a stored payment method:
+
+  - create/store the reusable payment source
+  - link it to the correct Square customer
+  - persist the resulting external identifier if needed
+
+The system must clearly distinguish between:
+
+  - one-time source token
+  - reusable stored payment source
+  - external subscription object
+
+--------------------------------------------------
+
+6. Recurring Plan Resolution Rule
+
+Before creating the subscription, the adapter must resolve which Square recurring plan/plan variation should be used.
+
+This resolution must be based on:
+
+  - product mapping
+  - billing period
+  - extension-managed subscription mapping data
+
+It must not:
+  - guess based on UI labels
+  - guess based on invoice title text alone
+  - create subscriptions without explicit mapping confidence
+
+--------------------------------------------------
+
+7. Subscription Creation Rule
+
+Subscription creation must occur only after:
+
+  - customer is ready
+  - payment source is ready
+  - recurring plan is resolved
+  - amount/currency expectations have been validated
+
+If Square returns success:
+  → store Square subscription ID and related metadata
+  → mark internal recurring relationship appropriately
+
+If Square returns failure:
+  → stop lifecycle execution safely
+  → surface a controlled error
+  → avoid incorrect invoice or subscription state
+
+--------------------------------------------------
+
+8. Internal Status Transition Rules
+
+The system must support clear internal subscription states such as:
+
+  pending
+      initial setup in progress
+
+  active
+      recurring billing established successfully
+
+  canceled
+      recurring billing intentionally terminated
+
+  failed
+      setup or billing attempt failed
+
+  suspended / past_due / retry
+      optional states depending on Square + FOSSBilling behavior
+
+The implementation must define explicit status transitions and not leave ambiguous state.
+
+--------------------------------------------------
+
+9. Initial Invoice Handling Rule
+
+For the first subscription-related payment, the implementation must clearly define whether:
+
+  A. the initial invoice payment and subscription creation happen together
+  OR
+  B. the invoice is paid first and subscription is created immediately after
+
+Whichever model is chosen, it must be:
+
+  - explicit
+  - consistent
+  - idempotent
+  - safe against duplicates
+
+--------------------------------------------------
+
+10. Renewal Lifecycle Rule
+
+For later renewals, the system must support recurring billing continuity.
+
+Renewal handling must be able to:
+
+  - recognize an existing subscription relationship
+  - associate recurring charges with the correct client and recurring record
+  - avoid creating a second initial subscription by mistake
+
+Renewals must not be treated as new signups unless the prior recurring relationship is gone and the business logic explicitly requires recreation.
+
+--------------------------------------------------
+
+11. Cancellation Rule
+
+If the subscription is canceled in Square or internally:
+
+  - FOSSBilling recurring record must be updated
+  - future renewals must not assume active recurring status
+  - payment processing must no longer attempt recurring continuation
+
+Cancellation must be reflected in internal status.
+
+--------------------------------------------------
+
+12. Failure & Retry Rule
+
+If subscription creation fails:
+
+  - record controlled failure state
+  - do not mark recurring status active
+  - do not silently continue
+  - do not leave half-created local records as valid
+
+If recurring billing later fails for an existing subscription:
+  - update internal status appropriately
+  - preserve identifiers needed for retry or audit
+  - avoid duplicate subscription creation during recovery
+
+--------------------------------------------------
+
+13. Duplicate Protection Rule
+
+The entire lifecycle must be idempotent.
+
+The system must protect against:
+
+  - multiple button clicks
+  - duplicate API submissions
+  - repeated webhook/callback style events
+  - duplicate subscription creation for same invoice/client context
+
+The adapter must never create multiple active subscriptions unintentionally for one intended signup.
+
+--------------------------------------------------
+
+14. Auditability Rule
+
+The lifecycle must preserve enough information to audit:
+
+  - when subscription was created
+  - which invoice triggered creation
+  - which client owns it
+  - which Square subscription/customer IDs were assigned
+  - what current status is
+
+This data must remain available for admin review and troubleshooting.
+
+--------------------------------------------------
+
+15. Strict Prohibitions
+
+The lifecycle must NOT:
+
+  - create subscription before payment prerequisites are valid
+  - create multiple subscriptions for same signup path
+  - treat every recurring invoice as first-time signup
+  - depend on frontend state after token submission
+  - depend on banklink redirects or PayPal-style callbacks
+
+--------------------------------------------------
+
+16. Final Responsibility
+
+This layer is strictly:
+
+  → "Create and maintain the recurring billing lifecycle safely"
+
+NOT:
+
+  → "Render checkout UI"
+  → "Perform frontend tokenization"
+  → "Replace transaction execution"
+
+
+
+Implementation Specification — Subscription Failure Recovery, Cancellation, and Sync Rules
+
+This section defines how the rebuilt Square payment adapter must behave when recurring billing does not proceed normally.
+
+--------------------------------------------------
+
+1. Purpose
+
+Failure recovery rules exist to ensure that recurring billing problems do not corrupt:
+
+  - invoice state
+  - transaction state
+  - subscription state
+  - client billing history
+
+The system must always fail safely and predictably.
+
+--------------------------------------------------
+
+2. Core Recovery Principle
+
+If any recurring billing action fails, the system must preserve consistency first.
+
+This means:
+
+  - do not mark invoice paid unless payment was truly successful
+  - do not mark subscription active unless subscription creation truly succeeded
+  - do not discard identifiers needed for diagnosis
+  - do not silently continue after a hard failure
+
+--------------------------------------------------
+
+3. Failure Categories
+
+The implementation must distinguish between at least these categories:
+
+  A. Payment execution failure
+     Example:
+       Square charge attempt fails
+
+  B. Subscription creation failure
+     Example:
+       payment source exists but Square subscription creation fails
+
+  C. Mapping/configuration failure
+     Example:
+       no valid recurring plan mapping exists
+
+  D. Local persistence/update failure
+     Example:
+       Square succeeded but local DB update fails
+
+Each category must be handled deliberately, not generically.
+
+--------------------------------------------------
+
+4. Safe Failure Rule
+
+On failure, the system must:
+
+  - stop the current lifecycle step
+  - return a controlled error
+  - preserve enough state for retry or investigation
+  - avoid partial “success” markers
+
+The adapter must never pretend a recurring setup completed when part of it failed.
+
+--------------------------------------------------
+
+5. Logging Rule
+
+Failures must be logged in a controlled and useful way.
+
+Logs should include:
+  - what step failed
+  - which invoice/subscription context was involved
+  - non-sensitive identifiers needed for tracing
+
+Logs must NOT include:
+  - raw card data
+  - secret keys
+  - unsafe token details
+
+--------------------------------------------------
+
+6. Retry Readiness Rule
+
+A failed recurring action must leave the system in a state where retry behavior is possible and understandable.
+
+This means:
+  - no duplicate active subscriptions
+  - no false paid invoices
+  - no ambiguous transaction status
+  - enough metadata retained to determine next action
+
+--------------------------------------------------
+
+7. Strict Prohibitions
+
+Failure recovery must NOT:
+  - auto-approve failed invoices
+  - mark failed subscriptions as active
+  - discard useful error context
+  - create duplicate follow-up records blindly
+
+--------------------------------------------------
+
+8. Final Responsibility
+
+This part of the lifecycle is strictly:
+
+  → "Fail safely and preserve consistency"
+
+NOT:
+
+  → "Recover by guessing"
+  → "Silently ignore errors"
+
+
+
+This section defines how the rebuilt Square payment adapter must handle subscription cancellations and internal recurring status transitions.
+
+--------------------------------------------------
+
+1. Purpose
+
+Cancellation rules exist to ensure that when a recurring billing relationship ends or is intentionally stopped, both Square and FOSSBilling remain consistent.
+
+The system must clearly represent when a subscription is no longer active and prevent future billing assumptions from continuing incorrectly.
+
+--------------------------------------------------
+
+2. Cancellation Sources
+
+The system must support cancellation originating from any of these sources:
+
+  A. Cancellation initiated inside FOSSBilling
+  B. Cancellation initiated in Square
+  C. Subscription ending automatically due to external lifecycle completion
+  D. Subscription termination caused by repeated billing failure or policy enforcement
+
+The implementation must not assume there is only one source of truth at the moment cancellation is detected.
+It must reconcile state safely.
+
+--------------------------------------------------
+
+3. Core Cancellation Rule
+
+When a subscription is canceled:
+
+  - the internal recurring record must no longer remain active
+  - future renewals must not assume recurring billing is still available
+  - the external Square subscription identifier must remain preserved for audit purposes
+  - billing continuity must stop unless an explicit reactivation flow exists
+
+--------------------------------------------------
+
+4. Required Internal Status Change
+
+When cancellation is confirmed, the system must transition the internal recurring record from:
+
+  active
+      →
+  canceled
+
+If the system uses intermediate states, those must still end in a non-active terminal or recoverable status that clearly prevents normal recurring billing continuation.
+
+--------------------------------------------------
+
+5. Invoice Behavior After Cancellation
+
+Cancellation must NOT automatically mark any unpaid invoice as paid.
+
+It must also NOT create a new active recurring billing record automatically.
+
+If future invoices are generated after cancellation, those invoices must be treated according to normal non-recurring or re-subscription business rules unless recurring service is explicitly re-established.
+
+--------------------------------------------------
+
+6. Transaction Behavior After Cancellation
+
+A cancellation event must not rewrite unrelated historical transactions.
+
+Past successful transactions must remain intact.
+
+Only the recurring relationship status and any relevant subscription-linked metadata should be updated.
+
+--------------------------------------------------
+
+7. Local Data Preservation Rule
+
+On cancellation, the system should preserve:
+
+  - Square subscription ID
+  - Square customer ID
+  - linked client ID
+  - linked invoice or recurring billing reference
+  - cancellation timestamp if available
+  - reason/source of cancellation if available
+
+This data must remain available for support, admin review, and diagnostics.
+
+--------------------------------------------------
+
+8. Reactivation Rule
+
+Cancellation must be treated as a real state transition.
+
+The system must NOT silently reactivate a canceled subscription.
+
+If reactivation is supported, it must occur only through an explicit new recurring setup flow or explicit admin/user action.
+
+A canceled subscription must never be resumed by mistake during normal invoice renewal processing.
+
+--------------------------------------------------
+
+9. Status Integrity Rule
+
+The implementation must ensure that internal statuses remain meaningful.
+
+Examples of safe status meanings:
+
+  active
+      recurring billing is valid and expected to continue
+
+  canceled
+      recurring billing is terminated and should not continue
+
+  failed
+      recurring billing setup or execution failed but is not necessarily intentionally terminated
+
+  pending
+      recurring setup has started but is not yet fully active
+
+The system must not mix cancellation and failure into one ambiguous state unless explicitly justified by design.
+
+--------------------------------------------------
+
+10. Strict Prohibitions
+
+Cancellation handling must NOT:
+
+  - leave the subscription marked active after confirmed cancellation
+  - automatically create a replacement subscription
+  - erase historical recurring identifiers
+  - retroactively modify already settled invoice states
+  - assume cancellation affects all subscriptions for a client unless explicitly linked
+
+--------------------------------------------------
+
+11. Final Responsibility
+
+This part of the lifecycle is strictly:
+
+  → "Transition recurring billing safely into a non-active state"
+
+NOT:
+
+  → "Rebuild billing automatically"
+  → "Guess future customer intent"
+
+
+
+
+This section defines how the rebuilt Square payment adapter and FOSSBilling must stay aligned over time.
+
+--------------------------------------------------
+
+1. Purpose
+
+Sync rules exist to ensure that the recurring billing state inside Square and the recurring billing state inside FOSSBilling do not drift apart.
+
+The system must be able to determine:
+
+  - what Square believes the subscription status is
+  - what FOSSBilling believes the subscription status is
+  - whether those two states are still consistent
+
+--------------------------------------------------
+
+2. Core Sync Principle
+
+Square and FOSSBilling must be treated as two connected systems with linked state.
+
+The rebuilt system must maintain a reliable mapping between:
+
+  - FOSSBilling recurring/subscription record
+  - Square subscription ID
+  - Square customer ID
+  - linked client and invoice context
+
+This mapping must allow either system’s state to be checked against the other.
+
+--------------------------------------------------
+
+3. Sync Direction Rules
+
+The implementation must support at least these sync directions:
+
+  A. Square → FOSSBilling
+     Example:
+       Square reports cancellation, failure, pause, or status change
+
+  B. FOSSBilling → Square
+     Example:
+       admin/user requests cancellation or recurring state change from within FOSSBilling
+
+The rebuild must not assume sync will always originate from one side only.
+
+--------------------------------------------------
+
+4. Consistency Rule
+
+If Square and FOSSBilling disagree on a subscription’s state, the system must detect that mismatch and resolve it safely.
+
+Examples of mismatches:
+
+  - Square says canceled, FOSSBilling says active
+  - Square says active, FOSSBilling says failed
+  - Square subscription ID missing locally but recurring record exists
+  - Local recurring record canceled but external subscription still active
+
+These cases must not be ignored silently.
+
+--------------------------------------------------
+
+5. State Reconciliation Requirement
+
+The system must define how reconciliation occurs when mismatch is detected.
+
+At minimum, reconciliation must:
+
+  - preserve identifiers
+  - update internal status to a safe and truthful state
+  - avoid duplicate subscription creation
+  - avoid false invoice/payment assumptions
+
+The rebuild should prefer consistency over convenience.
+
+--------------------------------------------------
+
+6. Sync Safety Rule
+
+A sync action must never:
+
+  - mark an invoice paid if no valid payment occurred
+  - create a second subscription for the same recurring relationship
+  - erase useful external identifiers
+  - silently override important state without auditability
+
+--------------------------------------------------
+
+7. Trigger Points for Sync
+
+The implementation must define when sync checks may occur.
+
+Potential allowed trigger points include:
+
+  - during recurring transaction processing
+  - during admin subscription actions
+  - during webhook/callback handling if implemented
+  - during scheduled reconciliation if such support is later added
+
+Sync rules must not depend on frontend behavior.
+
+--------------------------------------------------
+
+8. Status Truthfulness Rule
+
+When state is synchronized, FOSSBilling must reflect the truth as closely as is safely known.
+
+If Square confirms a state clearly:
+  → internal state should match appropriately
+
+If Square state is unknown or ambiguous:
+  → internal state should remain conservative and not falsely claim success or active billing
+
+--------------------------------------------------
+
+9. Auditability Rule
+
+Every meaningful sync-related change should preserve enough context to explain:
+
+  - what changed
+  - why it changed
+  - which external subscription it referred to
+  - which internal record was updated
+
+This is important for support, troubleshooting, and future maintainability.
+
+--------------------------------------------------
+
+10. Strict Prohibitions
+
+Sync logic must NOT:
+
+  - guess external state without evidence
+  - recreate subscriptions automatically because of a mismatch
+  - silently discard local or external identifiers
+  - rely on frontend checkout state
+  - depend on banklink flow
+
+--------------------------------------------------
+
+11. Final Responsibility
+
+This part of the lifecycle is strictly:
+
+  → "Keep Square state and FOSSBilling state aligned safely"
+
+NOT:
+
+  → "Trigger checkout"
+  → "Create subscriptions blindly"
+  → "Rewrite billing history"
+
+
+
+Implementation Specification — Recovery Actions, Retry Boundaries, and Admin Visibility Rules
+
+This section defines what the rebuilt Square payment adapter is allowed to retry, what it must never retry automatically, and how recovery actions must be bounded.
+
+--------------------------------------------------
+
+1. Purpose
+
+Recovery action rules exist to prevent failure handling from creating more damage than the original problem.
+
+The system must distinguish between:
+
+  - safe retry opportunities
+  - unsafe retry situations
+  - manual recovery requirements
+
+The adapter must never retry blindly.
+
+--------------------------------------------------
+
+2. Core Retry Principle
+
+A retry is allowed only when all of the following are true:
+
+  - the previous attempt did NOT complete successfully
+  - retrying will NOT create duplicate charges or duplicate subscriptions
+  - enough identifiers/state exist to safely determine what happened
+  - the failure type is known to be retryable
+
+If any of these conditions are unclear:
+  → do NOT auto-retry
+  → require controlled/manual handling instead
+
+--------------------------------------------------
+
+3. Safe Retry Categories
+
+The implementation may support retry behavior for failures such as:
+
+  A. temporary network/API transport issues
+  B. temporary local service interruption
+  C. temporary persistence/update failure after a clearly non-final step
+  D. explicitly retryable pending states defined by business rules
+
+These must only be retried if duplicate protection remains intact.
+
+--------------------------------------------------
+
+4. Unsafe Retry Categories
+
+The implementation must NOT automatically retry when the prior outcome is uncertain in ways that could cause duplication.
+
+Examples:
+
+  - payment may already have succeeded but local confirmation failed
+  - subscription may already have been created but persistence failed
+  - external state cannot yet be trusted or confirmed
+  - transaction status is ambiguous
+
+In these situations:
+  → preserve context
+  → stop automatic flow
+  → require controlled reconciliation
+
+--------------------------------------------------
+
+5. Payment Retry Rule
+
+If a payment attempt fails before confirmed success:
+  - the invoice must remain unpaid
+  - the transaction should remain in a non-processed state
+  - retry may be allowed only if idempotency protection can guarantee no duplicate charge
+
+If a payment may already have succeeded:
+  - do NOT auto-charge again
+  - transition into reconciliation/review path
+
+--------------------------------------------------
+
+6. Subscription Retry Rule
+
+If subscription creation fails:
+  - do NOT immediately attempt to create a second subscription blindly
+  - retry is allowed only when the system can prove that no active subscription was created for the same context
+
+If that cannot be proven:
+  - preserve identifiers and state
+  - require sync/reconciliation before retry
+
+--------------------------------------------------
+
+7. Retry Limit Rule
+
+The system must define a retry boundary.
+
+It must not:
+  - loop indefinitely
+  - continuously retry in the same request lifecycle
+  - hammer Square API
+  - repeat user-triggered retries without resetting state responsibly
+
+Retry policy must be explicit and conservative.
+
+--------------------------------------------------
+
+8. Manual Recovery Rule
+
+When retry is unsafe or ambiguous, the system must preserve enough information for manual recovery.
+
+Manual recovery context should make it possible to determine:
+
+  - what step failed
+  - whether payment may already have been created
+  - whether subscription may already have been created
+  - what invoice/client/gateway context was involved
+
+--------------------------------------------------
+
+9. Strict Prohibitions
+
+Recovery logic must NOT:
+
+  - retry blindly after unknown partial success
+  - create duplicate charges
+  - create duplicate recurring subscriptions
+  - erase failed transaction context before analysis
+  - convert ambiguous failures into fake success
+
+--------------------------------------------------
+
+10. Final Responsibility
+
+This part of the lifecycle is strictly:
+
+  → "Define when retry is safe and when recovery must stop"
+
+NOT:
+
+  → "Keep retrying until something works"
+  → "Guess whether external actions already succeeded"
+
+
+
+Implementation Specification — Recovery Actions, Retry Boundaries, and Admin Visibility Rules
+
+This section defines what information administrators must be able to see and use when recurring billing problems occur.
+
+--------------------------------------------------
+
+1. Purpose
+
+Admin visibility rules exist so that recurring billing issues can be reviewed, understood, and resolved without guessing.
+
+The rebuilt system must provide enough operational visibility to answer:
+
+  - what failed
+  - when it failed
+  - which client/invoice/subscription was affected
+  - whether payment may have succeeded
+  - whether a subscription may already exist in Square
+  - what action is safe next
+
+--------------------------------------------------
+
+2. Required Admin Context
+
+For any recurring billing record, admins should be able to review at minimum:
+
+  - client identifier
+  - invoice identifier
+  - gateway identifier
+  - recurring billing status
+  - Square customer ID
+  - Square subscription ID
+  - last known payment attempt status
+  - last known error message (sanitized)
+  - relevant timestamps
+  - billing period / mapped plan context
+
+This information must be preserved in a structured way.
+
+--------------------------------------------------
+
+3. Failure Visibility Rule
+
+When a recurring billing action fails, the failure must be visible in a way that clearly distinguishes:
+
+  - payment failure
+  - subscription creation failure
+  - mapping/configuration failure
+  - unknown/partial completion state
+  - local persistence/update failure
+
+Admins must not be left with only a generic “it failed” message if more specific safe context is available.
+
+--------------------------------------------------
+
+4. State Review Rule
+
+Admin-visible state must reflect the safest truthful status.
+
+Examples:
+
+  - active
+  - pending
+  - failed
+  - canceled
+  - needs review / ambiguous (if you choose to implement such a state)
+
+Operational review must make it possible to tell whether the next action is:
+
+  - retry
+  - cancel
+  - resync
+  - manual investigation
+
+--------------------------------------------------
+
+5. Audit Trail Requirement
+
+Important recurring lifecycle changes should leave an audit trail or equivalent trace.
+
+At minimum, admin review should be able to determine:
+
+  - when subscription was attempted
+  - when it became active
+  - when it failed
+  - when it was canceled
+  - when sync/reconciliation changed its status
+
+This does not require exposing secrets.
+It requires preserving meaningful operational history.
+
+--------------------------------------------------
+
+6. Error Message Rule
+
+User-facing errors and admin-facing errors must be different in strictness.
+
+User-facing:
+  - simple
+  - non-technical
+  - safe
+
+Admin-facing:
+  - more specific
+  - suitable for troubleshooting
+  - still sanitized
+
+Sensitive secrets must never be exposed in admin UI.
+
+--------------------------------------------------
+
+7. Manual Intervention Rule
+
+Admin visibility must support manual decision-making where automatic recovery is unsafe.
+
+Admins should be able to determine whether the situation requires:
+
+  - retrying a payment
+  - verifying Square state
+  - remapping a recurring plan
+  - canceling a broken recurring record
+  - re-establishing a subscription cleanly
+
+The system must not force admins to infer too much from incomplete data.
+
+--------------------------------------------------
+
+8. Sync Review Rule
+
+If Square and FOSSBilling state differ, admin-visible information should make that mismatch understandable.
+
+Examples of reviewable mismatches:
+
+  - local record active, external record canceled
+  - local record failed, external record active
+  - missing Square subscription ID for a record marked active
+  - multiple candidate external records for one local recurring relationship
+
+Admins must be able to see enough to decide on reconciliation.
+
+--------------------------------------------------
+
+9. Recovery Boundary Visibility Rule
+
+If the system decides that automatic retry is unsafe, that decision should be visible or at least diagnosable.
+
+It should be possible to determine:
+
+  - why automatic recovery stopped
+  - whether duplicate risk exists
+  - whether manual recovery is required
+
+--------------------------------------------------
+
+10. Strict Prohibitions
+
+Admin visibility rules must NOT:
+
+  - expose raw card data
+  - expose access tokens or secret keys
+  - expose unsafe payloads
+  - hide important recurring lifecycle failures behind only generic success/failure labels
+  - overwrite audit context during retries or sync reconciliation
+
+--------------------------------------------------
+
+11. Final Responsibility
+
+This part of the lifecycle is strictly:
+
+  → "Make recurring billing behavior understandable and reviewable by admins"
+
+NOT:
+
+  → "Perform payment execution"
+  → "Replace sync logic"
+  → "Expose secrets"
+
+
+Implementation Specification — Square API Integration Rules
+
+This section defines how the rebuilt Square payment adapter must communicate with Square safely and predictably.
+
+--------------------------------------------------
+
+1. Purpose
+
+The Square API layer is responsible for:
+
+  - creating one-time payments
+  - creating customers when required
+  - storing payment sources when required
+  - creating subscriptions when required
+  - returning structured results to backend logic
+
+It must be isolated from rendering and frontend behavior.
+
+--------------------------------------------------
+
+2. Core Rule
+
+All communication with Square must happen only in backend PHP.
+
+The browser must never:
+  - call Square secret endpoints directly
+  - know access tokens
+  - know private credentials
+
+Frontend may only:
+  - use Square Web Payments SDK
+  - tokenize card/payment details
+
+--------------------------------------------------
+
+3. Required Backend Configuration
+
+The adapter must accept and validate at minimum:
+
+  - access_token
+  - application_id
+  - location_id
+  - environment
+  - webhook_signature_key (optional if webhook support added)
+
+If critical config is missing:
+  - fail safely
+  - return controlled configuration error
+  - never break page rendering
+
+--------------------------------------------------
+
+4. Environment Handling
+
+The adapter must clearly separate sandbox and production modes.
+
+Sandbox base URL:
+  https://connect.squareupsandbox.com
+
+Production base URL:
+  https://connect.squareup.com
+
+Frontend SDK URL must match the selected environment.
+
+The rebuild must never mix:
+  - sandbox frontend with production backend
+  - production frontend with sandbox backend
+
+--------------------------------------------------
+
+5. Required API Capabilities
+
+The backend API layer must support these operations as separate helper methods:
+
+  A. Create one-time payment
+  B. Lookup or create customer
+  C. Store reusable card/payment source if required
+  D. Create subscription
+  E. Optional future support:
+      - cancel subscription
+      - retrieve subscription status
+      - webhook verification
+
+Each helper must have single responsibility.
+
+--------------------------------------------------
+
+6. One-Time Payment Request Rules
+
+A one-time payment request must include:
+
+  - source token
+  - idempotency key
+  - amount in minor units
+  - currency
+  - location_id
+  - descriptive note/reference if desired
+
+The backend must derive amount from invoice data only.
+It must never trust any frontend-supplied amount.
+
+--------------------------------------------------
+
+7. Customer Handling Rules
+
+If subscription flow or card-on-file flow requires a Square customer:
+
+  - search for existing customer if appropriate
+  - create customer only when needed
+  - persist or reuse Square customer ID
+
+The system must not create duplicate customer records unnecessarily.
+
+--------------------------------------------------
+
+8. Card / Payment Source Rules
+
+If recurring billing requires a reusable stored payment source:
+
+  - store the card/payment source after tokenization
+  - link it to the correct Square customer
+  - persist resulting reusable identifier if needed
+
+The one-time source token must not be treated as permanent state.
+
+--------------------------------------------------
+
+9. Subscription Request Rules
+
+A subscription creation request must include only validated backend-derived values such as:
+
+  - customer ID
+  - payment source/card ID
+  - plan or variation ID
+  - location ID
+  - idempotency key
+
+The adapter must not create subscriptions using guessed or weakly inferred plan identifiers.
+
+--------------------------------------------------
+
+10. HTTP Request Rules
+
+All Square API requests must:
+
+  - use explicit HTTP method
+  - include Authorization header
+  - include Square-Version header
+  - include JSON payload when required
+  - parse JSON responses safely
+  - handle transport errors explicitly
+
+The adapter must never assume successful JSON parsing without checking.
+
+--------------------------------------------------
+
+11. Response Validation Rules
+
+After each Square API call, the adapter must validate:
+
+  - HTTP success/failure
+  - existence of expected response fields
+  - absence of explicit API error object
+  - required identifiers returned by Square
+
+If expected values are missing:
+  - treat as failure
+  - return controlled error
+  - do not continue lifecycle blindly
+
+--------------------------------------------------
+
+12. Idempotency Rules
+
+Every action that could create a billable or persistent external object must use an idempotency key.
+
+Examples:
+  - one-time payment
+  - stored payment method creation if applicable
+  - subscription creation
+
+Idempotency keys must be:
+  - unique per logical operation
+  - deterministic enough to prevent duplicates when appropriate
+  - not reused across unrelated actions
+
+--------------------------------------------------
+
+13. Logging & Security Rules
+
+The adapter may log:
+  - operation names
+  - status results
+  - sanitized identifiers
+  - safe error summaries
+
+The adapter must never log:
+  - raw card data
+  - full secret tokens
+  - access tokens
+  - unsafe personally sensitive payment data
+
+--------------------------------------------------
+
+14. Failure Handling Rules
+
+On Square API failure:
+
+  - stop processing immediately
+  - preserve local consistency
+  - surface controlled backend error
+  - avoid false invoice success
+  - avoid false subscription activation
+
+The adapter must classify failures where possible:
+  - configuration error
+  - transport error
+  - validation error
+  - business-rule error
+  - ambiguous external state
+
+--------------------------------------------------
+
+15. Final Responsibility
+
+This layer is strictly:
+
+  → "Communicate with Square securely and return verified results"
+
+NOT:
+
+  → "Render UI"
+  → "Handle browser logic"
+  → "Control general invoice page rendering"
+
+Invoice State Rules
+
+Implementation Specification — Invoice & Transaction State Rules
+
+This section defines how the rebuilt Square payment adapter must treat invoice state so that billing remains correct and stable.
+
+--------------------------------------------------
+
+1. Purpose
+
+Invoice state rules exist to ensure that payment processing changes invoice status only when justified by real payment outcomes.
+
+The rebuilt system must preserve invoice correctness under:
+
+  - successful one-time payments
+  - successful initial subscription payments
+  - failed payment attempts
+  - partial or ambiguous backend failures
+  - retries and duplicate requests
+
+--------------------------------------------------
+
+2. Core Invoice Principle
+
+An invoice must never be marked as paid unless the backend has verified a successful payment result from Square and completed the required local update flow.
+
+Invoice state must be controlled only by backend logic.
+
+Frontend code must never:
+  - mark invoices paid
+  - suggest success without backend confirmation
+  - alter invoice state directly
+
+--------------------------------------------------
+
+3. Required Invoice States
+
+The implementation must respect meaningful invoice lifecycle states such as:
+
+  unpaid
+      invoice exists but no successful settlement has occurred
+
+  approved
+      invoice is valid and ready for settlement according to FOSSBilling rules
+
+  paid
+      invoice has been successfully settled
+
+  refunded / adjusted / other platform states
+      handled only when explicitly supported by adapter design
+
+The adapter must not invent conflicting invoice concepts that bypass FOSSBilling state management.
+
+--------------------------------------------------
+
+4. Initial Payment Rule
+
+For a normal successful payment:
+
+  - load the invoice
+  - validate invoice amount against backend-derived payment amount
+  - approve invoice if required by FOSSBilling flow
+  - apply payment using the correct invoice service behavior
+  - mark invoice paid only after transaction success is confirmed
+
+If any required step fails:
+  → invoice must not be falsely moved into paid state
+
+--------------------------------------------------
+
+5. Failure Rule
+
+If payment execution fails:
+
+  - invoice remains unpaid
+  - invoice must not be approved purely because payment was attempted
+  - user receives controlled failure response
+  - transaction state must reflect non-success
+
+If state becomes ambiguous:
+  - prefer leaving invoice unpaid/pending review rather than falsely paid
+
+--------------------------------------------------
+
+6. Subscription Initial Invoice Rule
+
+If the invoice is related to first-time recurring signup:
+
+  - the implementation must explicitly define whether payment success alone is enough to mark invoice paid
+  - if subscription creation is also required for the business flow, invoice finalization must remain consistent with that design
+
+The rebuild must not accidentally mark the invoice fully settled if the intended combined payment/subscription lifecycle is incomplete and the design requires both parts.
+
+--------------------------------------------------
+
+7. Renewal Invoice Rule
+
+Renewal invoices must be treated as their own invoice events.
+
+The system must support:
+
+  - resolving the correct invoice being paid
+  - ensuring recurring billing does not pay the wrong invoice
+  - keeping invoice linkage truthful for recurring charges
+
+Renewal invoices must not be confused with the original signup invoice.
+
+--------------------------------------------------
+
+8. Safety Requirement
+
+Invoice updates must be:
+
+  - idempotent where possible
+  - resistant to duplicate requests
+  - resistant to partial retry issues
+  - traceable to the transaction that caused the change
+
+--------------------------------------------------
+
+9. Strict Prohibitions
+
+Invoice state handling must NOT:
+
+  - mark invoice paid before confirmed backend success
+  - trust frontend payment claims
+  - update invoice state from browser-only results
+  - confuse one-time and recurring invoice handling
+  - silently override failed states as success
+
+--------------------------------------------------
+
+10. Final Responsibility
+
+This part of the lifecycle is strictly:
+
+  → "Define when invoice state may safely change"
+
+NOT:
+
+  → "Control frontend behavior"
+  → "Perform Square tokenization"
+
+
+Implementation Specification — Invoice & Transaction State Rules
+
+This section defines how the rebuilt Square payment adapter must manage transaction records so that payment history remains correct, auditable, and synchronized with invoice state.
+
+--------------------------------------------------
+
+1. Purpose
+
+Transaction state rules exist to ensure that every payment attempt has an accurate backend record.
+
+The rebuilt system must preserve transaction truth under:
+
+  - successful one-time payments
+  - successful recurring signup payments
+  - failed payment attempts
+  - duplicate submissions
+  - ambiguous or partially completed external outcomes
+
+--------------------------------------------------
+
+2. Core Transaction Principle
+
+A transaction record must reflect what is actually known about the payment attempt.
+
+It must never be used to imply success unless backend confirmation exists.
+
+Transaction state must be controlled only by backend processing.
+
+Frontend must never:
+  - mark a transaction processed
+  - fabricate transaction IDs
+  - alter transaction status directly
+
+--------------------------------------------------
+
+3. Required Transaction Outcomes
+
+The implementation must support meaningful transaction states such as:
+
+  received / pending
+      request accepted but not yet confirmed complete
+
+  processed
+      verified successful payment outcome
+
+  failed
+      verified unsuccessful outcome
+
+  ambiguous / needs review
+      optional state if the design supports uncertain external results
+
+These states must be explicit and not overloaded with conflicting meanings.
+
+--------------------------------------------------
+
+4. Creation Rule
+
+A transaction record must exist or be resolved before payment finalization is attempted.
+
+The adapter must be able to associate the current payment attempt with:
+
+  - invoice_id
+  - gateway_id
+  - client context if needed
+  - external Square identifiers after success
+
+The transaction record must never be detached from the invoice it belongs to.
+
+--------------------------------------------------
+
+5. Success Update Rule
+
+After verified successful payment execution, the transaction must be updated with:
+
+  - status = processed
+  - external transaction identifier (Square payment ID)
+  - transaction status text from Square if relevant
+  - amount
+  - currency
+  - updated timestamp
+
+Only then may invoice finalization continue.
+
+--------------------------------------------------
+
+6. Failure Update Rule
+
+If payment execution fails clearly:
+
+  - transaction must not be marked processed
+  - failure state or equivalent must be recorded
+  - useful sanitized error context should remain available
+  - invoice must remain consistent with failure
+
+A failed transaction must remain reviewable for retry or diagnostics.
+
+--------------------------------------------------
+
+7. Duplicate Protection Rule
+
+The adapter must protect against duplicate transaction processing caused by:
+
+  - double-clicking pay button
+  - repeated frontend requests
+  - network retries
+  - duplicate backend execution
+
+This must be enforced using:
+  - idempotency keys for Square
+  - careful transaction state handling locally
+
+The system must never create multiple processed records for the same logical charge.
+
+--------------------------------------------------
+
+8. External Identifier Rule
+
+When Square returns an external payment identifier, that identifier must be preserved in the transaction record.
+
+This allows:
+
+  - reconciliation
+  - audit
+  - duplicate detection
+  - support investigation
+
+If the external identifier is missing when success is expected:
+  → treat the situation as unsafe or incomplete rather than silently successful
+
+--------------------------------------------------
+
+9. Separation from Invoice Rule
+
+Transaction state and invoice state are related but not identical.
+
+The system must not assume:
+
+  processed transaction
+      always means invoice is already finalized
+
+or
+
+  unpaid invoice
+      means no transaction attempt exists
+
+Both records must be updated deliberately and in the correct order.
+
+--------------------------------------------------
+
+10. Ambiguity Rule
+
+If Square response is incomplete or the local update sequence is interrupted:
+
+  - transaction must not be falsely marked as success
+  - enough context must remain to reconcile later
+  - duplicate charging must be avoided
+
+When uncertain:
+  → prefer conservative non-success transaction state
+
+--------------------------------------------------
+
+11. Auditability Rule
+
+Each transaction should preserve enough safe information to answer:
+
+  - which invoice was affected
+  - which payment attempt occurred
+  - whether Square returned success or failure
+  - what external ID was assigned
+  - when the state changed
+
+This is required for support and recovery.
+
+--------------------------------------------------
+
+12. Strict Prohibitions
+
+Transaction handling must NOT:
+
+  - mark transaction processed before verified payment success
+  - overwrite historical successful transaction data incorrectly
+  - discard useful identifiers on failure
+  - rely on frontend claims of success
+  - allow duplicate processed outcomes for one intended charge
+
+--------------------------------------------------
+
+13. Final Responsibility
+
+This part of the lifecycle is strictly:
+
+  → "Define how payment attempt records are created, updated, and protected"
+
+NOT:
+
+  → "Render UI"
+  → "Perform tokenization"
+  → "Control page flow"
+
+--------------------------------------------------
+
+Error Handling Principles
+
+Implementation Specification — Error Handling, Logging, and Safe Failure Rules
+
+This section defines how the rebuilt Square payment adapter must handle errors so that failures never break invoice rendering, never corrupt billing state, and remain diagnosable.
+
+--------------------------------------------------
+
+1. Purpose
+
+Error handling rules exist to ensure that all failures are:
+
+  - safe
+  - controlled
+  - visible
+  - non-destructive
+  - recoverable when appropriate
+
+The rebuilt system must prioritize system stability over aggressive behavior.
+
+--------------------------------------------------
+
+2. Core Error Principle
+
+Every error must be handled at the lowest reasonable layer without allowing uncontrolled propagation to:
+
+  - Twig rendering
+  - invoice views
+  - checkout page rendering
+  - other unrelated FOSSBilling pages
+
+If a payment component fails, the surrounding application must remain usable.
+
+--------------------------------------------------
+
+3. Rendering Safety Rule
+
+The getHtml() method must NEVER throw fatal exceptions.
+
+If rendering prerequisites are missing:
+
+  - log the issue safely
+  - render a controlled payment-unavailable message if needed
+  - still return valid HTML string
+  - avoid breaking invoice page rendering
+
+This rule is absolute.
+
+--------------------------------------------------
+
+4. Backend Safety Rule
+
+Backend payment processing methods may throw controlled exceptions, but only where the calling flow is expected to handle them safely.
+
+These exceptions must:
+
+  - represent a known failure state
+  - avoid leaking sensitive details
+  - avoid corrupting invoice or transaction state
+
+Uncontrolled fatal errors are prohibited.
+
+--------------------------------------------------
+
+5. Frontend Safety Rule
+
+Frontend JS must catch all async and runtime errors from:
+
+  - Square SDK initialization
+  - card attachment
+  - tokenization
+  - API request submission
+  - API response parsing
+
+Frontend must:
+
+  - show user-friendly message
+  - re-enable Pay button where appropriate
+  - never rely on browser default behavior after failure
+
+--------------------------------------------------
+
+6. Failure Containment Rule
+
+If any one subsystem fails, failure must remain contained.
+
+Examples:
+
+  frontend tokenization failure
+      must not change backend state
+
+  backend payment failure
+      must not break invoice page rendering
+
+  subscription creation failure
+      must not falsely mark recurring state active
+
+  logging failure
+      must not become business logic failure
+
+--------------------------------------------------
+
+7. User Message Rule
+
+User-facing errors must be:
+
+  - clear
+  - short
+  - non-technical
+  - safe
+
+Examples of acceptable style:
+
+  "Payment failed. Please try again."
+  "Payment system is temporarily unavailable."
+  "Unable to process card details."
+
+User messages must never expose:
+  - access tokens
+  - internal SQL
+  - stack traces
+  - raw API payloads
+
+--------------------------------------------------
+
+8. Developer/Admin Message Rule
+
+Developer/admin-visible errors may be more specific, but still must remain sanitized.
+
+They may include:
+  - step that failed
+  - invoice or transaction context
+  - safe external identifiers
+  - safe error summaries
+
+They must not include:
+  - raw card data
+  - secret keys
+  - full authentication headers
+  - unsafe personal payment data
+
+--------------------------------------------------
+
+9. Default Failure Behavior
+
+When uncertain, the system must fail conservatively.
+
+That means:
+
+  - invoice stays unpaid
+  - transaction stays non-processed
+  - subscription stays non-active
+  - checkout remains on page with error shown
+
+The rebuild must prefer safe non-success over false success.
+
+--------------------------------------------------
+
+10. Strict Prohibitions
+
+Error handling must NOT:
+
+  - break unrelated pages
+  - convert unknown errors into silent success
+  - expose secrets to end users
+  - allow exceptions in getHtml() to escape
+  - mark billing objects successful after failure
+
+--------------------------------------------------
+
+11. Final Responsibility
+
+This part of the lifecycle is strictly:
+
+  → "Ensure all failures are contained, safe, and understandable"
+
+NOT:
+
+  → "Hide all errors"
+  → "Pretend failures succeeded"
+
+--------------------------------------------------
+
+Logging Rules & Observability
+
+Implementation Specification — Error Handling, Logging, and Safe Failure Rules
+
+This section defines how the rebuilt Square payment adapter must log activity and expose enough safe observability for debugging, support, and operational review.
+
+--------------------------------------------------
+
+1. Purpose
+
+Logging and observability rules exist to make the rebuilt adapter diagnosable without exposing secrets or harming payment security.
+
+The logging system must help answer:
+
+  - what step executed
+  - what failed
+  - what succeeded
+  - which invoice/transaction/subscription context was involved
+  - whether recovery or review is needed
+
+--------------------------------------------------
+
+2. Core Logging Principle
+
+Logs must be:
+
+  - useful
+  - structured
+  - safe
+  - optional/configurable
+  - non-destructive
+
+Logging must never become a source of:
+  - sensitive data exposure
+  - rendering breakage
+  - transaction corruption
+  - hidden side effects
+
+--------------------------------------------------
+
+3. Required Logging Scope
+
+The adapter should log meaningful lifecycle events such as:
+
+  A. getHtml() entry and safe render context
+  B. frontend-config generation
+  C. transaction processing start
+  D. invoice lookup result
+  E. customer lookup/creation result
+  F. payment source/card creation result
+  G. one-time payment result
+  H. subscription creation result
+  I. failure category and safe message
+  J. final success/failure state
+
+Each log line should identify what stage of the flow is running.
+
+--------------------------------------------------
+
+4. Safe Context Rule
+
+Logs may include safe identifiers such as:
+
+  - invoice ID
+  - transaction ID
+  - client ID
+  - gateway ID
+  - Square customer ID
+  - Square payment ID
+  - Square subscription ID
+  - environment name
+  - status labels
+  - billing interval labels
+
+Logs must not include unsafe details.
+
+--------------------------------------------------
+
+5. Sensitive Data Prohibition
+
+Logs must NEVER include:
+
+  - raw card number
+  - CVV
+  - expiration data
+  - full source token if sensitive policy forbids it
+  - access tokens
+  - secret keys
+  - authorization headers
+  - raw webhook signatures
+  - unsafe personally sensitive billing data
+
+If tokens or identifiers need logging for diagnostics, they must be masked or truncated where appropriate.
+
+--------------------------------------------------
+
+6. Frontend Logging Rule
+
+Frontend JS may log development-relevant console information such as:
+
+  - initialization start
+  - missing config fields
+  - Square SDK availability
+  - tokenize success/failure status
+  - API response success/failure
+
+Frontend logs must remain non-sensitive and should never expose:
+  - secrets
+  - raw card data
+  - unsafe backend payload details
+
+--------------------------------------------------
+
+7. Backend Logging Rule
+
+Backend logs should record:
+
+  - method entry
+  - important decision branches
+  - success/failure states
+  - sanitized API error summaries
+  - state transitions
+  - reconciliation/retry boundaries
+
+Backend logs must be sufficient to reconstruct the flow of one transaction attempt.
+
+--------------------------------------------------
+
+8. Configurable Debug Rule
+
+Debug logging should be explicitly configurable.
+
+Suggested behavior:
+
+  production-safe default:
+      reduced logging
+
+  debug mode:
+      expanded safe logging
+
+Enabling debug mode must not change business logic behavior.
+It should only increase observability.
+
+--------------------------------------------------
+
+9. Log Stability Rule
+
+Logging failures must never break payment behavior.
+
+If logging destination is unavailable:
+  - payment logic must still continue safely
+  - rendering must still continue safely
+  - business outcome must not change because logging failed
+
+--------------------------------------------------
+
+10. Correlation Rule
+
+The logging design should make it easy to correlate related events.
+
+At minimum, logs should make it possible to associate:
+
+  - one payment attempt
+  - its invoice
+  - its transaction
+  - its subscription if applicable
+  - its external Square identifiers
+
+This may be done through repeated safe context fields.
+
+--------------------------------------------------
+
+11. Admin Observability Rule
+
+The logs should support later admin troubleshooting by preserving enough context to explain:
+
+  - what stage failed
+  - what the system believed the state was
+  - whether duplicate protection was involved
+  - whether retry/review is likely required
+
+--------------------------------------------------
+
+12. Strict Prohibitions
+
+Logging rules must NOT:
+
+  - expose secrets
+  - require rendering to succeed
+  - become required for core logic
+  - overwrite useful earlier failure context without reason
+  - hide important stage transitions
+
+--------------------------------------------------
+
+13. Final Responsibility
+
+This part of the lifecycle is strictly:
+
+  → "Make adapter behavior observable without exposing sensitive data"
+
+NOT:
+
+  → "Store secrets in logs"
+  → "Replace business logic with log analysis"
+
+--------------------------------------------------
+Safe Failure Outcomes & Rollback Rules
+
+Implementation Specification — Error Handling, Logging, and Safe Failure Rules
+
+This section defines what the rebuilt Square payment adapter must do when something fails after partial work has already happened.
+
+--------------------------------------------------
+
+1. Purpose
+
+Safe failure outcome rules exist to ensure that partial failures do not leave the system in a misleading, broken, or contradictory state.
+
+The rebuilt system must always prefer:
+
+  - consistency
+  - auditability
+  - non-destructive failure
+  - conservative state transitions
+
+--------------------------------------------------
+
+2. Core Principle
+
+If the system cannot prove that a business action completed successfully, it must not record that action as fully successful.
+
+Examples:
+
+  payment may have failed
+      → do not mark invoice paid
+
+  subscription may not have been created
+      → do not mark recurring record active
+
+  local DB update may have failed
+      → do not assume persistence succeeded
+
+--------------------------------------------------
+
+3. Rollback Objective
+
+Rollback in this context does NOT require database-level transaction magic everywhere.
+
+Instead, it means the system must:
+
+  - avoid advancing local state too early
+  - avoid false success markers
+  - preserve enough information to reconcile partial failures later
+  - stop safely at the point of failure
+
+--------------------------------------------------
+
+4. Safe Failure Order Rule
+
+The implementation must order operations so that irreversible local changes happen only after required external success is known.
+
+Example principle:
+
+  validate first
+  → call Square
+  → verify result
+  → update transaction
+  → update invoice
+  → update subscription state
+
+This reduces the amount of rollback needed.
+
+--------------------------------------------------
+
+5. Payment Failure Outcome Rule
+
+If the Square payment request fails before confirmed success:
+
+  - invoice remains unpaid
+  - transaction remains non-processed
+  - subscription remains non-active
+  - user receives controlled error
+  - logs preserve safe failure details
+
+The system must not create fake success from a failed charge attempt.
+
+--------------------------------------------------
+
+6. Partial Success Ambiguity Rule
+
+If Square may have accepted an action, but the local system failed before finalizing state:
+
+  - do not immediately retry blindly
+  - do not mark full success unless verified
+  - preserve external identifiers if available
+  - move the situation into review/reconciliation-safe handling
+
+This is especially important for:
+  - payment creation
+  - subscription creation
+  - stored payment source creation
+
+--------------------------------------------------
+
+7. Local Update Failure Rule
+
+If external Square success is confirmed but a local DB or service update fails:
+
+  - preserve the external identifiers
+  - do not discard the successful external result
+  - stop automatic progression
+  - surface a controlled internal failure requiring reconciliation
+
+The system must not hide this situation.
+
+--------------------------------------------------
+
+8. Invoice Rollback Rule
+
+If invoice finalization fails after payment success is known:
+
+  - do not erase the transaction outcome
+  - do not pretend the payment never happened
+  - preserve enough context to safely apply the invoice update later
+  - avoid charging again during recovery unless explicitly proven safe
+
+--------------------------------------------------
+
+9. Subscription Rollback Rule
+
+If recurring subscription creation fails:
+
+  - recurring record must not be marked active
+  - invoice/payment state must follow explicit business rules
+  - local mapping/state must remain consistent with what is truly known
+  - duplicate subscription creation must be avoided during retry
+
+If subscription creation may already have succeeded externally:
+  - preserve that identifier if known
+  - do not create a second one blindly
+
+--------------------------------------------------
+
+10. Frontend Failure Outcome Rule
+
+If frontend fails before backend request:
+  - no backend state changes occur
+  - button is re-enabled
+  - user stays on payment page
+  - user sees a clear non-technical error
+
+Frontend failures must never create backend side effects by accident.
+
+--------------------------------------------------
+
+11. Retry Boundary Rule
+
+A safe failure outcome must leave the system in one of these states:
+
+  A. clearly retryable
+  B. clearly non-retryable
+  C. clearly needs reconciliation/manual review
+
+The system must not leave failures in an undefined middle state.
+
+--------------------------------------------------
+
+12. Recovery Information Rule
+
+After a safe failure, the system must still be able to determine:
+
+  - what step failed
+  - whether payment might already exist externally
+  - whether subscription might already exist externally
+  - what identifiers were assigned
+  - whether retry is dangerous
+
+This is required for support and recovery design.
+
+--------------------------------------------------
+
+13. Strict Prohibitions
+
+Safe failure handling must NOT:
+
+  - mark invoice paid on uncertain result
+  - mark transaction processed without verified payment success
+  - mark subscription active without verified creation success
+  - retry ambiguous operations automatically
+  - discard external identifiers needed for reconciliation
+
+--------------------------------------------------
+
+14. Final Responsibility
+
+This part of the lifecycle is strictly:
+
+  → "Define the safe final state after failure and how partial work is preserved"
+
+NOT:
+
+  → "Pretend failure is success"
+  → "Retry everything automatically"
+
+--------------------------------------------------
+
+Extension Module Purpose & Boundaries (Squaremanager)
+
+Implementation Specification — Extension Module Responsibilities (Squaremanager)
+
+This section defines exactly what the Squaremanager extension module is allowed to do and what it must never do.
+
+--------------------------------------------------
+
+1. Purpose
+
+The Squaremanager extension exists to support the Square payment adapter by providing administrative and configuration tooling.
+
+Its purpose is to make recurring billing easier to configure and maintain without owning checkout or payment execution.
+
+--------------------------------------------------
+
+2. Core Principle
+
+The extension module must be treated as:
+
+  → "Admin / configuration / deployment support layer"
+
+NOT as:
+
+  → "Primary payment execution engine"
+
+The payment adapter remains the authoritative payment engine.
+The extension supports it but must not replace it.
+
+--------------------------------------------------
+
+3. Allowed Responsibilities
+
+The extension may handle:
+
+  - Square plan mapping UI
+  - Product-to-recurring-plan association
+  - Storage of recurring billing metadata
+  - Admin inspection of Square-related objects
+  - Installer / deployment support for adapter-related files
+  - Optional export/import utilities
+  - Optional reconciliation assist tools for admins
+
+These tasks are valid because they reduce admin friction without taking ownership of payment execution.
+
+--------------------------------------------------
+
+4. Forbidden Responsibilities
+
+The extension must NOT:
+
+  - process card payments directly
+  - tokenize card data
+  - own checkout page logic
+  - override adapter runtime payment flow dynamically
+  - submit payment requests from the browser
+  - mark invoices paid
+  - create payment transactions directly
+
+Those responsibilities belong to:
+  - frontend checkout JS
+  - backend payment adapter
+  - core invoice/transaction services
+
+--------------------------------------------------
+
+5. Dependency Rule
+
+The extension may depend on the gateway adapter.
+
+The gateway adapter must NOT depend on the extension for basic payment execution.
+
+That means:
+
+  - base one-time payment flow should still conceptually belong to adapter
+  - extension may enhance recurring/subscription setup and admin management
+  - adapter must remain self-contained enough to execute payments safely
+
+--------------------------------------------------
+
+6. Admin-Facing Scope
+
+All extension UI should be admin-focused unless an explicit client-facing requirement exists.
+
+Examples of valid admin-facing features:
+
+  - mapping FOSSBilling products to Square recurring plans
+  - viewing stored plan mappings
+  - listing available Square subscription plans
+  - exporting summarized Square mapping data
+  - reviewing recurring setup metadata
+
+Examples of invalid admin-facing expansion:
+
+  - replacing checkout flow
+  - injecting hidden frontend payment logic into unrelated templates
+  - modifying invoice rendering globally
+
+--------------------------------------------------
+
+7. Data Ownership Rule
+
+The extension may own:
+
+  - plan mapping tables
+  - subscription helper metadata
+  - admin configuration records
+  - optional diagnostic metadata
+
+The extension must not assume ownership of:
+
+  - invoice truth
+  - transaction truth
+  - payment success state
+  - core recurring billing state without adapter/backend confirmation
+
+--------------------------------------------------
+
+8. Runtime Safety Rule
+
+If the extension is disabled:
+
+  - it must not corrupt unrelated invoices
+  - it must not break unrelated pages
+  - it must not leave payment rendering in a fatal state
+
+If the extension adds optional features only, those features may disappear when disabled, but the platform must remain stable.
+
+--------------------------------------------------
+
+9. Coupling Rule
+
+The extension and adapter must communicate through clear, minimal contracts.
+
+Examples of acceptable coupling:
+
+  - adapter reads mapping data from extension-owned storage
+  - extension deploys or configures adapter assets
+  - extension exposes admin tools for adapter configuration
+
+Examples of unacceptable coupling:
+
+  - extension reaching into adapter internals unpredictably
+  - adapter requiring extension UI state to execute payment
+  - frontend checkout flow depending on admin module DOM or templates
+
+--------------------------------------------------
+
+10. Strict Prohibitions
+
+The extension module must NOT:
+
+  - become the payment gateway itself
+  - duplicate adapter logic unnecessarily
+  - hijack FOSSBilling checkout flow
+  - assume PayPal-style redirect behavior
+  - introduce fragile dependencies on banklink processing
+
+--------------------------------------------------
+
+11. Final Responsibility
+
+This part of the system is strictly:
+
+  → "Support configuration, mapping, deployment, and admin review"
+
+NOT:
+
+  → "Execute payment lifecycle directly"
+
+--------------------------------------------------
+
+Extension Data Model & Mapping Rules
+
+Implementation Specification — Extension Module Responsibilities (Squaremanager)
+
+This section defines what data the Squaremanager extension is allowed to store and how mapping between FOSSBilling products and Square recurring billing objects must work.
+
+--------------------------------------------------
+
+1. Purpose
+
+The extension data model exists to support recurring billing administration without taking ownership of payment execution.
+
+Its stored data should help answer:
+
+  - which FOSSBilling product maps to which Square recurring plan
+  - which billing interval maps to which Square variation or cadence
+  - what admin-managed configuration is required to create subscriptions reliably
+  - what metadata is useful for review, export, or reconciliation assistance
+
+--------------------------------------------------
+
+2. Core Principle
+
+The extension data model must store only support/configuration data.
+
+It may store:
+  - mapping data
+  - admin helper metadata
+  - recurring plan linkage data
+  - optional inspection/export context
+
+It must not become the system of record for:
+  - invoice truth
+  - transaction truth
+  - payment success
+  - raw card/payment data
+
+--------------------------------------------------
+
+3. Required Mapping Capabilities
+
+The extension must support mapping between:
+
+  FOSSBilling side:
+    - product ID
+    - billing period / billing key / recurrence type
+    - optional service category or internal SKU
+
+  Square side:
+    - Square recurring plan ID
+    - Square recurring variation ID
+    - optional external naming/label metadata
+
+The mapping must be stable, explicit, and admin-controlled.
+
+--------------------------------------------------
+
+4. Mapping Granularity Rule
+
+Mappings must be granular enough to distinguish recurring options correctly.
+
+For example, mappings must be able to differentiate:
+
+  - monthly vs yearly for the same product
+  - one product vs another product sharing similar names
+  - separate Square plan variations for different billing cadences
+
+A single vague mapping per product is not sufficient if multiple recurring intervals exist.
+
+--------------------------------------------------
+
+5. Storage Requirements
+
+The extension should persist or be able to derive at least:
+
+  - local product identifier
+  - billing interval key
+  - Square plan/variation identifier
+  - current mapping status
+  - created/updated timestamps
+  - optional notes for admin review
+
+If additional helper fields are needed, they must remain clearly scoped to extension support concerns.
+
+--------------------------------------------------
+
+6. Integrity Rule
+
+Mapping data must be validated before use.
+
+The system must verify that:
+
+  - referenced product exists
+  - referenced billing key/interval is valid
+  - referenced Square identifier is non-empty and correctly associated
+  - duplicate conflicting mappings are not silently allowed
+
+Invalid mappings must fail safely and visibly.
+
+--------------------------------------------------
+
+7. Read/Write Boundary Rule
+
+The extension may:
+  - create mappings
+  - update mappings
+  - delete mappings
+  - list mappings for admin review
+
+The adapter may:
+  - read mappings
+  - validate mappings
+  - refuse subscription creation if mapping is missing or invalid
+
+The adapter should not be responsible for administering mapping UI.
+
+--------------------------------------------------
+
+8. Metadata Rule
+
+Optional metadata may be stored to support admin operations, such as:
+
+  - human-readable Square plan label
+  - detected cadence
+  - environment indicator
+  - external object inspection details
+  - export helper values
+
+This metadata must not replace the authoritative mapping keys themselves.
+
+--------------------------------------------------
+
+9. Environment Safety Rule
+
+If sandbox and production are both used, the extension must not confuse mappings across environments.
+
+The design should support clearly separating:
+  - sandbox mapping context
+  - production mapping context
+
+At minimum, the prompt should require environment awareness in mapping design.
+
+--------------------------------------------------
+
+10. Strict Prohibitions
+
+The extension data model must NOT:
+
+  - store raw card data
+  - store Square access tokens as mapping metadata
+  - overwrite invoice/transaction records to simulate success
+  - infer mappings from UI labels only
+  - create hidden coupling that requires extension state for one-time payments
+
+--------------------------------------------------
+
+11. Final Responsibility
+
+This part of the system is strictly:
+
+  → "Persist admin-managed mapping and support metadata"
+
+NOT:
+
+  → "Store payment truth"
+  → "Store raw payment instruments"
+  → "Replace adapter logic"
+
+--------------------------------------------------
+
+Extension Admin UI & Operational Features
+
+Implementation Specification — Extension Module Responsibilities (Squaremanager)
+
+This section defines what the Squaremanager extension should expose to administrators so recurring billing can be configured and reviewed safely without taking over payment execution.
+
+--------------------------------------------------
+
+1. Purpose
+
+The admin UI exists to make Square recurring billing manageable.
+
+It should help admins:
+
+  - map FOSSBilling products to Square recurring plans
+  - review current mappings
+  - inspect relevant Square-side recurring objects
+  - understand subscription-related configuration status
+  - diagnose mapping or setup issues
+  - perform safe administrative support tasks
+
+It must not become a replacement checkout or payment engine.
+
+--------------------------------------------------
+
+2. Core Principle
+
+Admin UI must be:
+
+  - configuration-focused
+  - operationally useful
+  - safe
+  - non-invasive
+  - separated from payment execution logic
+
+The admin module must help operators understand and manage recurring setup, not secretly run payment flow.
+
+--------------------------------------------------
+
+3. Required Admin Features
+
+The extension should support these feature categories:
+
+  A. Product-to-Plan Mapping
+     - assign FOSSBilling product/billing intervals to Square recurring plan IDs
+     - edit existing mappings
+     - remove invalid or obsolete mappings
+
+  B. Mapping Review
+     - list current mappings
+     - show associated product
+     - show billing period
+     - show Square plan/variation identifiers
+     - show status/validation state if available
+
+  C. Square Object Inspection
+     - list Square recurring plan objects or relevant external references
+     - show enough metadata to help admins select correct mapping
+     - keep this read-only unless explicit mutating tools are designed
+
+  D. Diagnostic Support
+     - display safe warnings when configuration or mapping is incomplete
+     - help admins understand why recurring creation would fail
+
+--------------------------------------------------
+
+4. Optional Admin Features
+
+The extension may also include optional support tools such as:
+
+  - export mapping data
+  - import mapping data
+  - basic sync review summaries
+  - environment visibility (sandbox vs production)
+  - recurring configuration validation helpers
+  - safe status review for stored recurring relationships
+
+These are optional support features only.
+
+--------------------------------------------------
+
+5. UI Data Requirements
+
+Each admin-facing mapping view should ideally present:
+
+  - FOSSBilling product name
+  - product ID
+  - billing interval / billing key
+  - Square plan/variation ID
+  - environment context
+  - last updated timestamp
+  - optional notes or validation state
+
+This information must help admins verify that the mapping is intentional and correct.
+
+--------------------------------------------------
+
+6. Validation in Admin UI
+
+Admin UI should validate inputs before saving mappings.
+
+At minimum, it should verify:
+
+  - product exists
+  - billing interval is valid
+  - Square plan identifier is non-empty
+  - duplicate/conflicting mapping does not already exist unintentionally
+
+Validation failures must be shown as controlled admin errors.
+They must not break the rest of the admin page.
+
+--------------------------------------------------
+
+7. Operational Review Rule
+
+The admin module should help answer:
+
+  - is Square configured?
+  - are mappings complete?
+  - which products still need recurring mapping?
+  - which mappings look invalid or outdated?
+  - which environment is currently being reviewed?
+
+This makes the extension operationally valuable without creeping into payment execution responsibilities.
+
+--------------------------------------------------
+
+8. Read-Only vs Mutating Action Rule
+
+The extension must clearly separate:
+
+  read-only actions
+      listing, inspecting, diagnosing, exporting
+
+  mutating actions
+      creating/updating/deleting mappings
+
+Mutating actions must be explicit and admin-controlled.
+The system must not auto-alter mappings based on weak guesses.
+
+--------------------------------------------------
+
+9. Stability Rule
+
+If the admin UI fails:
+
+  - checkout/payment pages must still remain stable
+  - invoice rendering must remain stable
+  - unrelated admin pages must remain usable
+
+The extension admin interface must never become a system-wide point of failure.
+
+--------------------------------------------------
+
+10. Security Rule
+
+The admin UI must never expose:
+
+  - Square access tokens
+  - secret keys
+  - raw payment tokens
+  - raw card/payment instrument data
+  - unsafe internal payloads
+
+Only safe identifiers and configuration summaries should be shown.
+
+--------------------------------------------------
+
+11. Strict Prohibitions
+
+The admin extension UI must NOT:
+
+  - embed live checkout logic
+  - inject runtime checkout behaviors into client pages
+  - process payments directly
+  - mark invoices paid
+  - create fake recurring state for testing without explicit labeling
+  - blur the line between support tooling and payment execution
+
+--------------------------------------------------
+
+12. Final Responsibility
+
+This part of the system is strictly:
+
+  → "Provide admin-facing configuration, review, and support tools"
+
+NOT:
+
+  → "Run payment lifecycle"
+  → "Own checkout behavior"
+  → "Replace adapter backend logic"
+
+--------------------------------------------------
+
+Deployment / Installer / File Placement Rules
+
+Implementation Specification — Deployment, Installer, and File Placement Rules
+
+This section defines how the rebuilt Square payment adapter and Squaremanager extension must be deployed so installation is predictable, upgrades are safe, and file placement never causes runtime instability.
+
+--------------------------------------------------
+
+1. Purpose
+
+Deployment rules exist to ensure that:
+
+  - the adapter is placed where FOSSBilling expects it
+  - the extension installs only what it is responsible for
+  - file updates do not break unrelated pages
+  - upgrades and rebuilds remain repeatable
+  - optional assets do not create hidden dependencies
+
+--------------------------------------------------
+
+2. Core Principle
+
+The deployment model must treat the payment adapter as the core runtime payment engine and the extension as the deployment/admin support layer.
+
+This means:
+
+  Adapter:
+    runtime payment logic
+
+  Extension:
+    installer, mapping UI, admin support
+
+The extension may deploy the adapter, but payment execution must not depend on fragile installer side effects after deployment completes.
+
+--------------------------------------------------
+
+3. Required File Placement
+
+The rebuilt project should maintain a clear file placement strategy.
+
+Minimum expected placement:
+
+  Payment adapter:
+    library/Payment/Adapter/Square.php
+
+  Extension module:
+    modules/Squaremanager/
+
+The adapter must live in the adapter path FOSSBilling expects for payment gateways.
+
+The extension must live in the normal module path for admin/configuration functionality.
+
+--------------------------------------------------
+
+4. Inline Frontend Rule
+
+To reduce deployment complexity, the checkout JavaScript should be embedded inline inside Square.php unless there is a strong reason not to.
+
+This avoids:
+  - missing JS file deployment
+  - public asset path errors
+  - mismatch between adapter version and JS version
+  - extra installer complexity
+
+If inline JS is used:
+  - no separate checkout JS file is required at runtime
+  - installer logic becomes simpler
+
+--------------------------------------------------
+
+5. Installer Responsibility Rule
+
+The extension installer may:
+
+  - copy or deploy Square.php to the adapter directory
+  - create required database tables for mapping/admin metadata
+  - seed extension configuration defaults if needed
+  - remove or update previous adapter versions carefully
+  - validate that required directories are writable before deployment
+
+The installer must NOT:
+  - silently alter unrelated core files
+  - modify FOSSBilling templates globally
+  - insert hidden checkout flow logic into unrelated pages
+
+--------------------------------------------------
+
+6. Upgrade Safety Rule
+
+Installer/update logic must be idempotent and safe to run multiple times.
+
+This means it should:
+  - check whether files already exist
+  - replace/update only intended adapter/module files
+  - preserve mapping/admin data where appropriate
+  - avoid duplicate table creation
+  - avoid destructive actions unless explicitly intended
+
+--------------------------------------------------
+
+7. Removal / Deactivation Rule
+
+If the extension is disabled or removed:
+
+  - unrelated invoice pages must continue working
+  - other payment gateways must continue working
+  - no fatal rendering dependency may remain
+  - optional extension-owned admin features may disappear safely
+
+If the adapter is removed:
+  - Square payments stop working
+  - but general FOSSBilling rendering must not crash
+
+Deactivation must be non-destructive to the rest of the system.
+
+--------------------------------------------------
+
+8. Version Alignment Rule
+
+The deployed adapter version and extension version must remain intentionally aligned.
+
+The rebuild should define a simple policy such as:
+
+  - extension releases deploy a specific adapter version
+  - adapter/runtime code and admin mapping code are developed together
+  - incompatible versions are not mixed silently
+
+This avoids debugging mismatched runtime/admin behavior.
+
+--------------------------------------------------
+
+9. Database Migration Rule
+
+If the extension introduces tables for:
+  - plan mappings
+  - admin metadata
+  - recurring helper records
+
+then installer/migration logic must:
+  - create them safely
+  - update schema safely
+  - never destroy critical data unintentionally
+  - remain backward-compatible where possible
+
+--------------------------------------------------
+
+10. Environment Awareness Rule
+
+Deployment must account for sandbox vs production configuration safely.
+
+The installer and extension should not hardcode environment-specific values into runtime files in a way that makes switching environment dangerous.
+
+Environment-specific values should remain configurable, not baked permanently into deployment artifacts.
+
+--------------------------------------------------
+
+11. Logging During Install Rule
+
+Installer/deployment actions may log:
+
+  - file copied
+  - table created
+  - mapping schema initialized
+  - version updated
+
+Installer logging must remain safe and must not expose secrets or break deployment if logging fails.
+
+--------------------------------------------------
+
+12. Strict Prohibitions
+
+Deployment logic must NOT:
+
+  - modify FOSSBilling core templates to force Square behavior
+  - depend on banklink route hacks
+  - require manual editing of unrelated files for normal operation
+  - deploy frontend assets into fragile public locations unless explicitly justified
+  - make invoice rendering depend on extension admin files at runtime
+
+--------------------------------------------------
+
+13. Final Responsibility
+
+This part of the system is strictly:
+
+  → "Install, update, place, and maintain the adapter/module safely"
+
+NOT:
+
+  → "Own checkout execution"
+  → "Replace runtime payment logic"
+  → "Patch core templates as a normal dependency"
+
+--------------------------------------------------
+
+STEP 5A — Rebuild Execution Plan (Phase Order)
+
+Implementation Specification — Rebuild Execution Plan
+
+This section defines the order in which the Square payment adapter and Squaremanager extension must be rebuilt so that the project is stable at every stage and never re-enters the earlier mixed-architecture failures.
+
+--------------------------------------------------
+
+1. Purpose
+
+The rebuild execution plan exists to force a disciplined implementation order.
+
+The project must be rebuilt in phases so that:
+
+  - rendering is stabilized first
+  - payment execution is validated second
+  - subscription logic is added only after payment is reliable
+  - extension/admin tooling is added only after runtime is proven stable
+
+--------------------------------------------------
+
+2. Core Principle
+
+Build from the inside out:
+
+  Phase 1:
+    stable adapter rendering
+
+  Phase 2:
+    stable Square tokenization and direct API payment execution
+
+  Phase 3:
+    stable invoice/transaction updates
+
+  Phase 4:
+    stable subscription creation and lifecycle
+
+  Phase 5:
+    extension/admin tooling and deployment automation
+
+Never build admin convenience features before runtime payment flow is proven.
+
+--------------------------------------------------
+
+3. Phase 1 — Runtime Rendering Baseline
+
+Goal:
+  make invoice payment page render safely every time
+
+Tasks:
+  - create fresh Square.php adapter skeleton
+  - implement getConfig()
+  - implement safe constructor/config loading
+  - implement getHtml() as render-only method
+  - inject squareConfig safely
+  - inline minimal JS stub
+  - ensure no Twig/rendering exceptions occur
+  - ensure invoice pages and payment pages load even if Square is misconfigured
+
+Definition of success:
+  - invoice/payment page renders
+  - no banklink POST behavior is triggered
+  - no Twig/url/pagination breakage occurs
+  - no hidden form dependencies exist
+
+--------------------------------------------------
+
+4. Phase 2 — Frontend Payment Baseline
+
+Goal:
+  make Square UI initialize and tokenize successfully
+
+Tasks:
+  - inline production-safe checkout JS
+  - attach Square SDK card element
+  - validate required config fields
+  - implement Pay button click handling
+  - prevent default navigation/submission behavior
+  - tokenize card successfully
+  - display controlled frontend errors
+  - confirm no nested form or checkout collisions occur
+
+Definition of success:
+  - card fields render
+  - Pay button does not navigate away unexpectedly
+  - tokenization returns expected token in sandbox
+  - user receives safe feedback on failure
+
+--------------------------------------------------
+
+5. Phase 3 — Backend Payment Execution Baseline
+
+Goal:
+  make one-time payment processing work end-to-end
+
+Tasks:
+  - implement processTransaction()
+  - validate invoice_id, gateway_id, source_token
+  - call Square payment API
+  - update transaction state correctly
+  - update invoice state correctly
+  - add safe backend logging
+  - verify duplicate protection / idempotency basics
+
+Definition of success:
+  - one-time sandbox payment succeeds
+  - invoice is marked paid only after verified success
+  - transaction is stored correctly
+  - failures keep invoice unpaid and transaction non-processed
+
+--------------------------------------------------
+
+6. Phase 4 — Subscription Runtime
+
+Goal:
+  add recurring billing only after one-time payments are stable
+
+Tasks:
+  - implement recurring invoice detection
+  - implement customer lookup/creation
+  - implement payment source/card storage
+  - implement recurring plan mapping resolution
+  - implement Square subscription creation
+  - store recurring linkage data safely
+  - implement safe subscription states
+  - validate initial signup vs renewal handling
+
+Definition of success:
+  - initial recurring signup succeeds in sandbox
+  - no duplicate subscriptions are created
+  - failed recurring creation does not falsely activate subscription
+  - recurring records remain auditable
+
+--------------------------------------------------
+
+7. Phase 5 — Extension / Admin Tooling
+
+Goal:
+  layer Squaremanager on top without destabilizing runtime
+
+Tasks:
+  - create or rebuild mapping tables
+  - build product-to-plan mapping admin UI
+  - build recurring plan inspection tools
+  - build validation and diagnostics UI
+  - implement installer/deployment logic
+  - keep adapter self-contained and independent of extension runtime
+
+Definition of success:
+  - admin can configure recurring mappings safely
+  - disabling extension does not crash payment pages
+  - adapter still functions as core payment engine
+
+--------------------------------------------------
+
+8. Phase 6 — Recovery / Sync / Hardening
+
+Goal:
+  finalize operational safety after runtime is working
+
+Tasks:
+  - implement cancellation handling
+  - implement sync/reconciliation rules
+  - implement safe retry boundaries
+  - improve admin observability
+  - harden logging and failure visibility
+  - verify environment separation (sandbox vs production)
+
+Definition of success:
+  - recurring lifecycle remains stable after failures
+  - admin can diagnose and manage mismatches
+  - no unsafe duplicate recovery behavior exists
+
+--------------------------------------------------
+
+9. Build Discipline Rule
+
+Do NOT move to the next phase until the current phase is proven stable.
+
+Each phase must have a clear acceptance checkpoint.
+No “temporary hacks” from later phases should be pulled backward into earlier phases.
+
+--------------------------------------------------
+
+10. Final Responsibility
+
+This section is strictly:
+
+  → "Define implementation order and phase gates"
+
+NOT:
+
+  → "Provide final code"
+  → "Blur boundaries between runtime and admin tooling"
+
+--------------------------------------------------
+
+Validation, Testing, and Phase Exit Criteria
+
+Implementation Specification — Rebuild Execution Plan
+
+This section defines how each rebuild phase must be validated before moving forward so the project never returns to a partially working but unstable state.
+
+--------------------------------------------------
+
+1. Purpose
+
+Validation rules exist to ensure that every major rebuild phase is proven stable before the next layer is added.
+
+The rebuild must use phase exit criteria so that:
+  - rendering problems are caught before payment logic is added
+  - payment logic is proven before subscription logic is added
+  - subscription logic is proven before extension/admin tooling is added
+  - deployment is not finalized until runtime behavior is verified
+
+--------------------------------------------------
+
+2. Core Validation Principle
+
+No new phase may begin until the current phase passes all of its required checks.
+
+A phase is considered complete only when:
+  - required behavior works
+  - known regressions are absent
+  - failures behave safely
+  - no unrelated pages are broken
+
+--------------------------------------------------
+
+3. Phase 1 Exit Criteria — Rendering Baseline
+
+Before Phase 1 is considered complete, all of the following must be true:
+
+  - invoice payment page renders successfully
+  - invoice list and invoice detail pages render successfully
+  - no Twig rendering exceptions occur
+  - no pagination/url helper failures occur
+  - Square container appears correctly
+  - getHtml() returns valid HTML every time
+  - misconfiguration does not crash page rendering
+  - no banklink POST submission is triggered automatically
+
+If any of the above fail:
+  → Phase 1 is not complete
+
+--------------------------------------------------
+
+4. Phase 2 Exit Criteria — Frontend Tokenization Baseline
+
+Before Phase 2 is considered complete, all of the following must be true:
+
+  - Square SDK loads successfully
+  - card UI attaches successfully
+  - Pay button does not navigate away unexpectedly
+  - clicking Pay does not submit or redirect via banklink
+  - tokenization succeeds in sandbox
+  - tokenization failure produces safe UI feedback
+  - no missing-element JS errors occur
+  - no dependency exists on nested forms or checkout template modification
+
+If any of the above fail:
+  → Phase 2 is not complete
+
+--------------------------------------------------
+
+5. Phase 3 Exit Criteria — One-Time Payment Baseline
+
+Before Phase 3 is considered complete, all of the following must be true:
+
+  - backend receives tokenized request correctly
+  - processTransaction() executes for one-time payment
+  - Square payment succeeds in sandbox
+  - successful payment updates transaction correctly
+  - successful payment updates invoice correctly
+  - failed payment leaves invoice unpaid
+  - duplicate submission does not create duplicate charge
+  - no unrelated FOSSBilling pages are broken by adapter logic
+
+If any of the above fail:
+  → Phase 3 is not complete
+
+--------------------------------------------------
+
+6. Phase 4 Exit Criteria — Subscription Runtime Baseline
+
+Before Phase 4 is considered complete, all of the following must be true:
+
+  - recurring invoice detection works
+  - customer creation/reuse works
+  - payment source/card storage works if required
+  - recurring plan mapping resolves correctly
+  - Square subscription creation succeeds in sandbox
+  - subscription linkage is stored correctly
+  - duplicate subscription creation is prevented
+  - failed subscription creation does not falsely activate recurring state
+  - renewals are not confused with initial signup flow
+
+If any of the above fail:
+  → Phase 4 is not complete
+
+--------------------------------------------------
+
+7. Phase 5 Exit Criteria — Extension/Admin Tooling Baseline
+
+Before Phase 5 is considered complete, all of the following must be true:
+
+  - admin can create/update/delete mappings safely
+  - mapping validation works
+  - recurring plan inspection tools work
+  - extension data persists correctly
+  - disabling extension does not crash payment pages
+  - adapter remains functional as the runtime payment engine
+  - extension does not hijack checkout flow
+
+If any of the above fail:
+  → Phase 5 is not complete
+
+--------------------------------------------------
+
+8. Phase 6 Exit Criteria — Recovery / Sync / Hardening
+
+Before Phase 6 is considered complete, all of the following must be true:
+
+  - cancellation path updates internal state safely
+  - sync mismatch cases are diagnosable
+  - safe retry boundaries are enforced
+  - ambiguous external results do not cause duplicate billing
+  - admin review information is sufficient for troubleshooting
+  - logging remains safe and useful
+  - sandbox and production configuration remain clearly separated
+
+If any of the above fail:
+  → Phase 6 is not complete
+
+--------------------------------------------------
+
+9. Required Testing Categories
+
+Each phase should be validated using the following categories where applicable:
+
+  A. happy-path test
+     expected successful outcome
+
+  B. configuration failure test
+     missing or invalid config must fail safely
+
+  C. user error test
+     invalid card / invalid token / incomplete input
+
+  D. backend failure test
+     failed API / failed persistence / failed mapping
+
+  E. duplicate action test
+     repeated click or repeated request
+
+  F. regression test
+     unrelated invoice pages still render correctly
+
+--------------------------------------------------
+
+10. Regression Protection Rule
+
+At the end of every phase, verify:
+  - invoice pages still load
+  - invoice lists still load
+  - payment page still renders
+  - no new Twig exceptions appear
+  - no global checkout/navigation regression is introduced
+
+This rule prevents the exact type of system-wide instability seen in the previous build attempt.
+
+--------------------------------------------------
+
+11. Documentation Rule
+
+Each phase should produce a short implementation note recording:
+  - what was changed
+  - what was tested
+  - what passed
+  - what remains open
+
+This prevents rebuild drift and makes later debugging easier.
+
+--------------------------------------------------
+
+12. Final Responsibility
+
+This section is strictly:
+
+  → "Define when a phase is truly complete"
+
+NOT:
+
+  → "Add new features before validation"
+  → "Accept partial success as done"
+
+--------------------------------------------------
+
+Final Acceptance Criteria / Definition of Done
+
+Implementation Specification — Final Acceptance Criteria
+
+This section defines when the rebuilt Square payment adapter project is considered complete enough to be accepted as successful.
+
+The project is NOT done when it merely "sort of works."
+It is only done when all required runtime, subscription, extension, and safety conditions are met.
+
+--------------------------------------------------
+
+1. Purpose
+
+The definition of done exists to prevent the rebuilt project from being accepted in a partially working, unstable, or misleading state.
+
+Completion requires:
+
+  - stable rendering
+  - stable one-time payments
+  - stable recurring billing
+  - safe failure behavior
+  - safe extension behavior
+  - no regression into banklink/form confusion
+  - no regression into invoice rendering breakage
+
+--------------------------------------------------
+
+2. Core Definition of Done
+
+The rebuilt project is considered complete only when ALL of the following are true:
+
+  A. Payment pages render safely
+  B. One-time Square payments work end-to-end
+  C. Subscription setup works end-to-end
+  D. Invoice and transaction state remain correct
+  E. Failures are safe and diagnosable
+  F. The extension supports admin configuration without owning payment execution
+  G. Deployment is repeatable and safe
+  H. No unrelated FOSSBilling invoice pages are broken
+
+--------------------------------------------------
+
+3. Rendering Acceptance Criteria
+
+Rendering is considered complete only when:
+
+  - invoice payment page loads without Twig exceptions
+  - invoice list page loads without Twig exceptions
+  - invoice detail page loads without Twig exceptions
+  - Square container renders correctly
+  - getHtml() never breaks pagination, URL helpers, or unrelated invoice rendering
+  - payment UI renders even when Square is misconfigured, using safe fallback behavior
+
+If invoice views can still be broken by enabling the adapter:
+  → project is NOT done
+
+--------------------------------------------------
+
+4. Frontend Acceptance Criteria
+
+Frontend integration is considered complete only when:
+
+  - Square SDK loads successfully
+  - card element attaches correctly
+  - Pay button works without page-navigation side effects
+  - clicking Pay does not submit to /invoice/banklink/
+  - no nested form dependency exists
+  - tokenization succeeds in sandbox
+  - tokenize failure shows controlled UI message
+  - frontend errors do not break the rest of the page
+
+If payment still depends on checkout form hacks or banklink redirects:
+  → project is NOT done
+
+--------------------------------------------------
+
+5. One-Time Payment Acceptance Criteria
+
+One-time payment flow is considered complete only when:
+
+  - backend receives tokenized payment request
+  - processTransaction() successfully executes a Square payment
+  - transaction record is updated correctly
+  - invoice is marked paid only after verified payment success
+  - duplicate clicks/requests do not create duplicate charges
+  - failed charge does not mark invoice paid
+  - sandbox success and sandbox failure paths are both tested
+
+If one-time payments work only inconsistently or require manual intervention:
+  → project is NOT done
+
+--------------------------------------------------
+
+6. Subscription Acceptance Criteria
+
+Recurring billing support is considered complete only when:
+
+  - recurring invoice intent is detected reliably
+  - Square customer creation/reuse works
+  - reusable payment source/card handling works if required
+  - recurring plan mapping resolves correctly
+  - Square subscription creation succeeds in sandbox
+  - recurring identifiers are stored safely
+  - initial signup and renewal logic are clearly separated
+  - duplicate subscription creation is prevented
+  - failed subscription setup does not falsely mark recurring state active
+
+If recurring logic is unstable, ambiguous, or duplicates subscriptions:
+  → project is NOT done
+
+--------------------------------------------------
+
+7. Invoice & Transaction Acceptance Criteria
+
+Billing state handling is considered complete only when:
+
+  - invoice state changes only after verified backend success
+  - transaction records accurately reflect success/failure
+  - invoice and transaction do not drift into contradictory states
+  - ambiguous results do not produce false success
+  - audit context is preserved for troubleshooting
+  - renewals do not apply to the wrong invoice
+
+If invoices or transactions can still enter inconsistent states:
+  → project is NOT done
+
+--------------------------------------------------
+
+8. Failure Handling Acceptance Criteria
+
+Failure handling is considered complete only when:
+
+  - getHtml() never throws fatal rendering exceptions
+  - frontend errors are caught and displayed safely
+  - backend failures return controlled errors
+  - invoice remains unpaid on failed payment
+  - transaction remains non-processed on failed payment
+  - subscription remains non-active on failed recurring setup
+  - logs are useful but sanitized
+  - ambiguous external outcomes do not trigger unsafe automatic retries
+
+If failures can still corrupt state or crash invoice rendering:
+  → project is NOT done
+
+--------------------------------------------------
+
+9. Extension Acceptance Criteria
+
+Squaremanager extension support is considered complete only when:
+
+  - admin can configure recurring mappings safely
+  - extension stores only support/configuration data
+  - extension does not execute payments directly
+  - adapter remains self-contained as payment engine
+  - disabling extension does not crash invoice/payment pages
+  - extension admin UI helps mapping and diagnostics without hijacking checkout flow
+
+If the extension still owns runtime payment behavior:
+  → project is NOT done
+
+--------------------------------------------------
+
+10. Deployment Acceptance Criteria
+
+Deployment is considered complete only when:
+
+  - adapter is deployed to correct adapter location
+  - extension is deployed to correct module location
+  - installation/update is repeatable
+  - inline JS eliminates fragile runtime asset dependency (if chosen design uses inline JS)
+  - enabling/disabling project does not break unrelated pages
+  - no core template modifications are required for normal operation
+
+If deployment still requires fragile manual edits:
+  → project is NOT done
+
+--------------------------------------------------
+
+11. Regression Acceptance Criteria
+
+The project must pass regression checks confirming:
+
+  - invoice pages still render
+  - invoice lists still render
+  - payment pages still render
+  - other gateways still function
+  - Twig URL/pagination helpers are unaffected
+  - banklink route is not improperly used as Square processing route
+
+If enabling Square can still destabilize unrelated billing pages:
+  → project is NOT done
+
+--------------------------------------------------
+
+12. Final Responsibility
+
+This section is strictly:
+
+  → "Define the exact standard for project completion"
+
+NOT:
+
+  → "Accept partial workaround as success"
+  → "Allow unstable behavior to ship"
+
+--------------------------------------------------
+Non-Negotiable Guardrails / Anti-Regression Checklist
+
+Implementation Specification — Non-Negotiable Guardrails / Anti-Regression Checklist
+
+This section defines the hard rules that must never be violated during the rebuild, no matter how convenient a shortcut may seem during implementation.
+
+These rules exist specifically to prevent regression into the exact failure patterns already experienced.
+
+--------------------------------------------------
+
+1. Purpose
+
+The anti-regression checklist exists to protect the rebuilt project from repeating known architectural mistakes.
+
+It is the “do not cross this line” section of the project prompt.
+
+Any implementation that violates these guardrails must be treated as incorrect, even if it appears to work temporarily.
+
+--------------------------------------------------
+
+2. Absolute Runtime Guardrails
+
+The rebuilt Square payment adapter must NEVER:
+
+  - post payment submissions to /invoice/banklink/
+  - rely on banklink POST processing for Square
+  - copy PayPal-style redirect gateway behavior
+  - use nested forms inside the payment UI
+  - require modification of FOSSBilling core templates for normal operation
+  - break invoice rendering when enabled
+  - throw fatal exceptions from getHtml()
+  - cause unrelated invoice pages to fail
+
+If any of the above occur:
+  → implementation is invalid
+
+--------------------------------------------------
+
+3. Frontend Guardrails
+
+The frontend payment logic must NEVER:
+
+  - call form.submit()
+  - trigger default checkout/banklink navigation
+  - depend on the outer checkout form structure
+  - depend on undocumented FOSSBilling JS helpers
+  - depend on jQuery-only behavior
+  - access raw card data
+  - expose secrets in browser code
+  - manipulate invoice/payment state directly
+
+If any of the above occur:
+  → frontend design is invalid
+
+--------------------------------------------------
+
+4. Backend Guardrails
+
+The backend adapter must NEVER:
+
+  - trust frontend amount values
+  - mark invoices paid before verified backend payment success
+  - mark transactions processed before verified Square success
+  - mark subscriptions active before verified creation success
+  - retry ambiguous operations blindly
+  - create duplicate charges
+  - create duplicate subscriptions
+  - expose sensitive configuration in errors/logs
+  - let payment failures break Twig rendering
+
+If any of the above occur:
+  → backend design is invalid
+
+--------------------------------------------------
+
+5. Extension Guardrails
+
+The Squaremanager extension must NEVER:
+
+  - own payment execution
+  - tokenize cards
+  - submit payments from browser
+  - mark invoices paid
+  - replace the gateway adapter as runtime payment engine
+  - inject fragile checkout behavior into unrelated pages
+  - create hidden coupling that makes one-time payments depend on admin mapping data
+  - destabilize invoice rendering when enabled/disabled
+
+If any of the above occur:
+  → extension design is invalid
+
+--------------------------------------------------
+
+6. Rendering Guardrails
+
+The system must ALWAYS preserve these guarantees:
+
+  - invoice pages render
+  - invoice pagination renders
+  - payment page renders
+  - enabling Square does not break unrelated invoice views
+  - misconfiguration degrades safely
+  - getHtml() always returns valid HTML string
+
+If enabling Square can still break invoice browsing:
+  → rebuild is not acceptable
+
+--------------------------------------------------
+
+7. Security Guardrails
+
+The rebuilt project must NEVER:
+
+  - handle raw card data in PHP
+  - store raw card data locally
+  - expose Square access token to frontend
+  - log raw card data
+  - log unmasked secrets
+  - treat source token as a permanent reusable identifier unless explicitly converted through backend flow
+  - bypass validation of invoice_id, gateway_id, or tokenized input
+
+If any of the above occur:
+  → implementation is unsafe
+
+--------------------------------------------------
+
+8. Subscription Guardrails
+
+Recurring billing logic must NEVER:
+
+  - run for all invoices by default
+  - treat every recurring invoice as a first-time signup
+  - guess plan mappings from labels alone
+  - create recurring subscriptions without explicit verified mapping
+  - silently reactivate canceled subscriptions
+  - mark recurring state active on partial failure
+  - ignore mismatch between Square and FOSSBilling state
+
+If any of the above occur:
+  → subscription lifecycle design is invalid
+
+--------------------------------------------------
+
+9. Recovery Guardrails
+
+Failure recovery must NEVER:
+
+  - hide ambiguous outcomes as success
+  - auto-retry potentially successful charges
+  - auto-retry potentially successful subscription creations
+  - erase identifiers needed for reconciliation
+  - leave support with no actionable context
+  - convert uncertainty into false paid/active state
+
+If any of the above occur:
+  → recovery logic is invalid
+
+--------------------------------------------------
+
+10. Deployment Guardrails
+
+Deployment/install logic must NEVER:
+
+  - require manual edits to unrelated core files for normal use
+  - depend on fragile external JS file paths unless explicitly justified
+  - patch core templates as a normal requirement
+  - break when run more than once
+  - make adapter runtime dependent on admin UI availability
+  - leave the system unstable after disable/remove
+
+If any of the above occur:
+  → deployment design is invalid
+
+--------------------------------------------------
+
+11. Final Anti-Regression Rule
+
+The rebuilt project must always preserve this architecture:
+
+  Adapter:
+    runtime payment engine
+
+  Inline JS:
+    tokenization + request handoff only
+
+  Extension:
+    admin/configuration/deployment support only
+
+If any layer begins taking over responsibilities from another layer in uncontrolled ways:
+  → stop and redesign before continuing
+
+--------------------------------------------------
+
+12. Final Responsibility
+
+This section is strictly:
+
+  → "Define the hard non-negotiable boundaries that prevent regression"
+
+NOT:
+
+  → "Allow temporary hacks because they seem faster"
+
+--------------------------------------------------
+
